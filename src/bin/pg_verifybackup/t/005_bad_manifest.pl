@@ -208,7 +208,7 @@ sub test_bad_manifest
 	print $fh $manifest_contents;
 	close($fh);
 
-	command_fails_like([ 'pg_verifybackup', $tempdir ], $regexp, $test_name);
+	command_fails_like([ 'pg_verifybackup', '-Fp', $tempdir ], $regexp, $test_name);
 	return;
 }
 
