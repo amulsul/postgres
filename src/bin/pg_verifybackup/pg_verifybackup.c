@@ -94,6 +94,7 @@ main(int argc, char **argv)
 		{"exit-on-error", no_argument, NULL, 'e'},
 		{"ignore", required_argument, NULL, 'i'},
 		{"manifest-path", required_argument, NULL, 'm'},
+		{"format", required_argument, NULL, 'F'},
 		{"no-parse-wal", no_argument, NULL, 'n'},
 		{"progress", no_argument, NULL, 'P'},
 		{"quiet", no_argument, NULL, 'q'},
@@ -109,6 +110,7 @@ main(int argc, char **argv)
 	bool		quiet = false;
 	char	   *wal_directory = NULL;
 	char	   *pg_waldump_path = NULL;
+	char		format = '\0';	/* p(lain)/t(ar) */
 
 	pg_logging_init(argv[0]);
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_verifybackup"));
@@ -151,7 +153,7 @@ main(int argc, char **argv)
 	simple_string_list_append(&context.ignore_list, "recovery.signal");
 	simple_string_list_append(&context.ignore_list, "standby.signal");
 
-	while ((c = getopt_long(argc, argv, "ei:m:nPqsw:", long_options, NULL)) != -1)
+	while ((c = getopt_long(argc, argv, "eF:i:m:nPqsw:", long_options, NULL)) != -1)
 	{
 		switch (c)
 		{
@@ -169,6 +171,15 @@ main(int argc, char **argv)
 			case 'm':
 				manifest_path = pstrdup(optarg);
 				canonicalize_path(manifest_path);
+				break;
+			case 'F':
+				if (strcmp(optarg, "p") == 0 || strcmp(optarg, "plain") == 0)
+					format = 'p';
+				else if (strcmp(optarg, "t") == 0 || strcmp(optarg, "tar") == 0)
+					format = 't';
+				else
+					pg_fatal("invalid backup format \"%s\", must be \"plain\" or \"tar\"",
+							 optarg);
 				break;
 			case 'n':
 				no_parse_wal = true;
@@ -217,10 +228,42 @@ main(int argc, char **argv)
 		pg_fatal("cannot specify both %s and %s",
 				 "-P/--progress", "-q/--quiet");
 
+	/* Auto detect the format if not specified */
+	if (format == '\0' )
+	{
+		char	   *path;
+		struct stat sb;
+
+		/*
+		 * If PG_VERSION is found in the target directory, consider it a
+		 * plain-format backup; otherwise, assume it's a tar-format backup.
+		 */
+		path = psprintf("%s/%s", context.backup_directory, "PG_VERSION");
+		format = (stat(path, &sb) == 0) ? 'p' : 't';
+	}
+
+	/*
+	 * Include pg_wal.tar in the ignore_list for the same reason we exclude the
+	 * pg_wal directory.
+	 */
+	if (format == 't')
+		simple_string_list_append(&context.ignore_list, "pg_wal.tar");
+
 	/* Unless --no-parse-wal was specified, we will need pg_waldump. */
 	if (!no_parse_wal)
 	{
 		int			ret;
+
+		/*
+		 * XXX: In the future, we should consider enhancing pg_waldump to read
+		 * WAL files from the tar archive.
+		 */
+		if (format != 'p')
+		{
+			pg_log_error("pg_waldump does not support parsing WAL files from a tar archive.");
+			pg_log_error_hint("Try \"%s --help\" to skip parse WAL files option.", progname);
+			exit(1);
+		}
 
 		pg_waldump_path = pg_malloc(MAXPGPATH);
 		ret = find_other_exec(argv[0], "pg_waldump",
@@ -1069,6 +1112,7 @@ usage(void)
 	printf(_("  -e, --exit-on-error         exit immediately on error\n"));
 	printf(_("  -i, --ignore=RELATIVE_PATH  ignore indicated path\n"));
 	printf(_("  -m, --manifest-path=PATH    use specified path for manifest\n"));
+	printf(_("  -F, --format=p|t            backup format (plain, tar)\n"));
 	printf(_("  -n, --no-parse-wal          do not try to parse WAL files\n"));
 	printf(_("  -P, --progress              show progress information\n"));
 	printf(_("  -q, --quiet                 do not print any output, except for errors\n"));
