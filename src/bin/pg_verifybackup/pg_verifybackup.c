@@ -18,7 +18,6 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#include "common/logging.h"
 #include "common/parse_manifest.h"
 #include "fe_utils/simple_list.h"
 #include "getopt_long.h"
@@ -692,6 +691,22 @@ verify_control_file(const char *controlpath, uint64 manifest_system_identifier)
 	pg_log_debug("reading \"%s\"", controlpath);
 	control_file = get_controlfile_by_exact_path(controlpath, &crc_ok);
 
+	verify_control_file_contents(control_file, controlpath, crc_ok,
+								 manifest_system_identifier);
+
+	/* Release memory. */
+	pfree(control_file);
+}
+
+/*
+ * A helper function that performs the actual canity check control file and
+ * validate system identifier against manifest system identifier.
+ */
+void
+verify_control_file_contents(ControlFileData *control_file,
+							 const char *controlpath, bool crc_ok,
+							 uint64 manifest_system_identifier)
+{
 	/* Control file contents not meaningful if CRC is bad. */
 	if (!crc_ok)
 		report_fatal_error("%s: CRC is incorrect", controlpath);
@@ -707,9 +722,6 @@ verify_control_file(const char *controlpath, uint64 manifest_system_identifier)
 						   controlpath,
 						   (unsigned long long) manifest_system_identifier,
 						   (unsigned long long) control_file->system_identifier);
-
-	/* Release memory. */
-	pfree(control_file);
 }
 
 /*

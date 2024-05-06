@@ -16,6 +16,7 @@
 
 #include "common/controldata_utils.h"
 #include "common/hashfn_unstable.h"
+#include "common/logging.h"
 #include "common/parse_manifest.h"
 #include "fe_utils/simple_list.h"
 
@@ -105,6 +106,9 @@ extern bool verify_content_checksum(verifier_context *context,
 									pg_checksum_context *checksum_ctx,
 									manifest_file *m, uint8 *buf,
 									int buf_len, size_t *computed_len);
+extern void verify_control_file_contents(ControlFileData *control_file,
+										 const char *controlpath, bool crc_ok,
+										 uint64 manifest_system_identifier);
 
 extern void report_backup_error(verifier_context *context,
 								const char *pg_restrict fmt,...)
