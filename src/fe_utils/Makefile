@@ -34,13 +34,20 @@ OBJS = \
 	simple_list.o \
 	string_utils.o
 
+AOBJS = \
+	astreamer_file.o \
+	astreamer_gzip.o \
+	astreamer_lz4.o \
+	astreamer_tar.o \
+	astreamer_zstd.o
+
 ifeq ($(PORTNAME), win32)
 override CPPFLAGS += -DFD_SETSIZE=1024
 endif
 
 all: libpgfeutils.a
 
-libpgfeutils.a: $(OBJS)
+libpgfeutils.a: $(AOBJS) $(OBJS)
 	rm -f $@
 	$(AR) $(AROPT) $@ $^
 
@@ -59,5 +66,5 @@ uninstall:
 	rm -f '$(DESTDIR)$(libdir)/libpgfeutils.a'
 
 clean distclean:
-	rm -f libpgfeutils.a $(OBJS) lex.backup
+	rm -f libpgfeutils.a $(AOBJS) $(OBJS) lex.backup
 	rm -f psqlscan.c
