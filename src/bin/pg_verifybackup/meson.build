@@ -1,7 +1,8 @@
 # Copyright (c) 2022-2024, PostgreSQL Global Development Group
 
 pg_verifybackup_sources = files(
-  'pg_verifybackup.c'
+  'pg_verifybackup.c',
+  'astreamer_verify.c'
 )
 
 if host_system == 'windows'
@@ -10,9 +11,10 @@ if host_system == 'windows'
     '--FILEDESC', 'pg_verifybackup - verify a backup against using a backup manifest'])
 endif
 
+pg_verifybackup_deps = [frontend_code, libpq, lz4, zlib, zstd]
 pg_verifybackup = executable('pg_verifybackup',
   pg_verifybackup_sources,
-  dependencies: [frontend_code, libpq],
+  dependencies: pg_verifybackup_deps,
   kwargs: default_bin_args,
 )
 bin_targets += pg_verifybackup

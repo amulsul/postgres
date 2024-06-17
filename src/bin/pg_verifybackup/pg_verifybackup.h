@@ -106,9 +106,9 @@ extern bool verify_content_checksum(verifier_context *context,
 									pg_checksum_context *checksum_ctx,
 									manifest_file *m, uint8 *buf,
 									int buf_len, size_t *computed_len);
-extern void verify_control_file_contents(ControlFileData *control_file,
-										 const char *controlpath, bool crc_ok,
-										 uint64 manifest_system_identifier);
+extern void verify_control_file_data(ControlFileData *control_file,
+									 const char *controlpath, bool crc_ok,
+									 uint64 manifest_system_identifier);
 
 extern void report_backup_error(verifier_context *context,
 								const char *pg_restrict fmt,...)
@@ -116,5 +116,14 @@ extern void report_backup_error(verifier_context *context,
 extern void report_fatal_error(const char *pg_restrict fmt,...)
 			pg_attribute_printf(1, 2) pg_attribute_noreturn();
 extern bool should_ignore_relpath(verifier_context *context, const char *relpath);
+
+/* Forward declaration to avoid fe_utils/astreamer.h include. */
+struct astreamer;
+typedef struct astreamer astreamer;
+extern astreamer *astreamer_verify_content_new(astreamer *next,
+											   verifier_context *context,
+											   char *archive_name,
+											   Oid tblspc_oid);
+
 
 #endif /* PG_VERIFYBACKUP_H */
