@@ -774,6 +774,72 @@ verify_backup_checksums(verifier_context *context)
 }
 
 /*
+ * It computes the checksum incrementally for the received bytes, requiring the
+ * caller to pass a properly initialized checksum_ctx parameter. Once the
+ * complete file content is received, which is tracked using the computed_len
+ * parameter, it verifies against the manifest data. If any error occurs, it
+ * returns false; otherwise, it returns true to indicate either the complete
+ * file content is yet to be received or checksum verification is completed
+ * successfully.
+ */
+bool
+verify_content_checksum(verifier_context *context,
+						pg_checksum_context *checksum_ctx,
+						manifest_file *m, uint8 *buffer,
+						int buffer_len, size_t *computed_len)
+{
+	char	   *relpath = m->pathname;
+	uint8		checksumbuf[PG_CHECKSUM_MAX_LENGTH];
+	int			checksumlen;
+
+	if (pg_checksum_update(checksum_ctx, buffer, buffer_len) < 0)
+	{
+		report_backup_error(context, "could not update checksum of file \"%s\"",
+							relpath);
+		return false;
+	}
+
+	/* Update the total count of computed checksum bytes. */
+	*computed_len += buffer_len;
+
+	/* Report progress */
+	done_size += buffer_len;
+	progress_report(false);
+
+	/* Yet to receive the full content of the file. */
+	if (*computed_len < m->size)
+		return true;
+
+	/* Get the final checksum. */
+	checksumlen = pg_checksum_final(checksum_ctx, checksumbuf);
+	if (checksumlen < 0)
+	{
+		report_backup_error(context,
+							"could not finalize checksum of file \"%s\"",
+							relpath);
+		return false;
+	}
+
+	/* And check it against the manifest. */
+	if (checksumlen != m->checksum_length)
+	{
+		report_backup_error(context,
+							"file \"%s\" has checksum of length %d, but expected %d",
+							relpath, m->checksum_length, checksumlen);
+		return false;
+	}
+	else if (memcmp(checksumbuf, m->checksum_payload, checksumlen) != 0)
+	{
+		report_backup_error(context,
+							"checksum mismatch for file \"%s\"",
+							relpath);
+		return false;
+	}
+
+	return true;
+}
+
+/*
  * Verify the checksum of a single file.
  */
 static void
@@ -785,8 +851,6 @@ verify_file_checksum(verifier_context *context, manifest_file *m,
 	int			fd;
 	int			rc;
 	size_t		bytes_read = 0;
-	uint8		checksumbuf[PG_CHECKSUM_MAX_LENGTH];
-	int			checksumlen;
 
 	/* Open the target file. */
 	if ((fd = open(fullpath, O_RDONLY | PG_BINARY, 0)) < 0)
@@ -808,19 +872,14 @@ verify_file_checksum(verifier_context *context, manifest_file *m,
 	/* Read the file chunk by chunk, updating the checksum as we go. */
 	while ((rc = read(fd, buffer, READ_CHUNK_SIZE)) > 0)
 	{
-		bytes_read += rc;
-		if (pg_checksum_update(&checksum_ctx, buffer, rc) < 0)
+		if (!verify_content_checksum(context, &checksum_ctx, m, buffer, rc,
+									 &bytes_read))
 		{
-			report_backup_error(context, "could not update checksum of file \"%s\"",
-								relpath);
 			close(fd);
 			return;
 		}
-
-		/* Report progress */
-		done_size += rc;
-		progress_report(false);
 	}
+
 	if (rc < 0)
 		report_backup_error(context, "could not read file \"%s\": %m",
 							relpath);
@@ -845,32 +904,9 @@ verify_file_checksum(verifier_context *context, manifest_file *m,
 	 * filesystem misbehavior.
 	 */
 	if (bytes_read != m->size)
-	{
 		report_backup_error(context,
 							"file \"%s\" should contain %zu bytes, but read %zu bytes",
 							relpath, m->size, bytes_read);
-		return;
-	}
-
-	/* Get the final checksum. */
-	checksumlen = pg_checksum_final(&checksum_ctx, checksumbuf);
-	if (checksumlen < 0)
-	{
-		report_backup_error(context,
-							"could not finalize checksum of file \"%s\"",
-							relpath);
-		return;
-	}
-
-	/* And check it against the manifest. */
-	if (checksumlen != m->checksum_length)
-		report_backup_error(context,
-							"file \"%s\" has checksum of length %d, but expected %d",
-							relpath, m->checksum_length, checksumlen);
-	else if (memcmp(checksumbuf, m->checksum_payload, checksumlen) != 0)
-		report_backup_error(context,
-							"checksum mismatch for file \"%s\"",
-							relpath);
 }
 
 /*
