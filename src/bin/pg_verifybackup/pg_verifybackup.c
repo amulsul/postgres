@@ -624,34 +624,46 @@ verify_backup_file(verifier_context *context, char *relpath, char *fullpath)
 	}
 
 	/* Check whether there's an entry in the manifest hash. */
-	m = manifest_files_lookup(context->manifest->files, relpath);
-	if (m == NULL)
-	{
-		report_backup_error(context,
-							"\"%s\" is present on disk but not in the manifest",
-							relpath);
-		return;
-	}
-
-	/* Flag this entry as having been encountered in the filesystem. */
-	m->matched = true;
-
-	/* Check that the size matches. */
-	if (m->size != sb.st_size)
-	{
-		report_backup_error(context,
-							"\"%s\" has size %lld on disk but size %zu in the manifest",
-							relpath, (long long int) sb.st_size, m->size);
-		m->bad = true;
-	}
+	m = verify_manifest_entry(context, relpath, sb.st_size);
 
 	/*
 	 * Validate the manifest system identifier, not available in manifest
 	 * version 1.
 	 */
 	if (context->manifest->version != 1 &&
-		strcmp(relpath, "global/pg_control") == 0)
+		strcmp(relpath, "global/pg_control") == 0 &&
+		m->matched && !m->bad)
 		verify_control_file(fullpath, context->manifest->system_identifier);
+}
+
+/*
+ * Verify file and its size entry in the manifest.
+ */
+manifest_file *
+verify_manifest_entry(verifier_context *context, char *relpath, size_t filesize)
+{
+	manifest_file *m;
+
+	m = manifest_files_lookup(context->manifest->files, relpath);
+	if (m == NULL)
+	{
+		report_backup_error(context,
+							"\"%s\" is present on disk but not in the manifest",
+							relpath);
+		return NULL;
+	}
+
+	/* Flag this entry as having been encountered in the filesystem. */
+	m->matched = true;
+
+	/* Check that the size matches. */
+	if (m->size != filesize)
+	{
+		report_backup_error(context,
+							"\"%s\" has size %lld on disk but size %zu in the manifest",
+							relpath, (long long int) filesize, m->size);
+		m->bad = true;
+	}
 
 	/* Update statistics for progress report, if necessary */
 	if (show_progress && !skip_checksums && should_verify_checksum(m))
@@ -663,6 +675,8 @@ verify_backup_file(verifier_context *context, char *relpath, char *fullpath)
 	 * afterwards verify the checksums. That's because computing checksums may
 	 * take a while, and we'd like to report more obvious problems quickly.
 	 */
+
+	return m;
 }
 
 /*
