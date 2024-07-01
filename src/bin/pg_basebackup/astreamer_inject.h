@@ -13,7 +13,6 @@
 #define ASTREAMER_INJECT_H
 
 #include "fe_utils/astreamer.h"
-#include "pqexpbuffer.h"
 
 extern astreamer *astreamer_recovery_injector_new(astreamer *next,
 												  bool is_recovery_guc_supported,

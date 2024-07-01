@@ -24,6 +24,7 @@
 
 #include "common/compression.h"
 #include "lib/stringinfo.h"
+#include "pqexpbuffer.h"
 
 struct astreamer;
 struct astreamer_ops;
