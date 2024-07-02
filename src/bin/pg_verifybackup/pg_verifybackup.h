@@ -105,6 +105,7 @@ typedef struct verifier_context
 	manifest_data *manifest;
 	char	   *backup_directory;
 	SimpleStringList ignore_list;
+	char		format;			/* backup format:  p(lain)/t(ar) */
 	bool		skip_checksums;
 	bool		exit_on_error;
 	bool		saw_any_error;
