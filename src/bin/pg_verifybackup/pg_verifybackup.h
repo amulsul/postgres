@@ -18,6 +18,7 @@
 #include "common/hashfn_unstable.h"
 #include "common/logging.h"
 #include "common/parse_manifest.h"
+#include "fe_utils/astreamer.h"
 #include "fe_utils/simple_list.h"
 
 /*
@@ -127,5 +128,10 @@ extern void report_fatal_error(const char *pg_restrict fmt,...)
 			pg_attribute_printf(1, 2) pg_attribute_noreturn();
 extern bool should_ignore_relpath(verifier_context *context,
 								  const char *relpath);
+
+extern astreamer *astreamer_verify_content_new(astreamer *next,
+											   verifier_context *context,
+											   char *archive_name,
+											   Oid tblspc_oid);
 
 #endif							/* PG_VERIFYBACKUP_H */

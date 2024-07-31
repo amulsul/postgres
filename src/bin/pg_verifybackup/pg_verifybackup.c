@@ -20,9 +20,11 @@
 
 #include "common/compression.h"
 #include "common/parse_manifest.h"
+#include "common/relpath.h"
 #include "fe_utils/simple_list.h"
 #include "getopt_long.h"
 #include "pg_verifybackup.h"
+#include "pgtar.h"
 #include "pgtime.h"
 
 /*
@@ -38,6 +40,16 @@
  * might be no checksum at all.
  */
 #define ESTIMATED_BYTES_PER_MANIFEST_LINE	100
+
+/*
+ * Tar archive information needed for content verification.
+ */
+typedef struct tarFile
+{
+	char	   *relpath;
+	Oid			tblspc_oid;
+	pg_compress_algorithm compress_algorithm;
+} tarFile;
 
 static manifest_data *parse_manifest_file(char *manifest_path);
 static void verifybackup_version_cb(JsonManifestParseContext *context,
@@ -61,7 +73,16 @@ static char find_backup_format(verifier_context *context);
 static void verify_backup_directory(verifier_context *context,
 									char *relpath, char *fullpath);
 static void verify_backup_file(verifier_context *context,
-							   char *relpath, char *fullpath);
+							   char *relpath, char *fullpath,
+							   SimplePtrList *tarFiles);
+static void verify_plain_file(verifier_context *context,
+							  char *relpath, char *fullpath,
+							  size_t filesize);
+static void verify_tar_file(verifier_context *context, char *relpath, char *fullpath,
+							int64 filesize, SimplePtrList *tarFiles);
+static void verify_tar_content(verifier_context *context, SimplePtrList *tarFiles);
+static void verify_tar_content_gut(verifier_context *context, char *relpath,
+								   char *fullpath, astreamer *streamer);
 static void report_extra_backup_files(verifier_context *context);
 static void verify_backup_checksums(verifier_context *context);
 static void verify_file_checksum(verifier_context *context,
@@ -70,6 +91,10 @@ static void verify_file_checksum(verifier_context *context,
 static void parse_required_wal(verifier_context *context,
 							   char *pg_waldump_path,
 							   char *wal_directory);
+static astreamer *create_archive_verifier(verifier_context *context,
+										  char *archive_name,
+										  Oid tblspc_oid,
+										  pg_compress_algorithm compress_algo);
 
 static void progress_report(bool finished);
 static void usage(void);
@@ -148,6 +173,10 @@ main(int argc, char **argv)
 	 */
 	simple_string_list_append(&context.ignore_list, "backup_manifest");
 	simple_string_list_append(&context.ignore_list, "pg_wal");
+	simple_string_list_append(&context.ignore_list, "pg_wal.tar");
+	simple_string_list_append(&context.ignore_list, "pg_wal.tar.gz");
+	simple_string_list_append(&context.ignore_list, "pg_wal.tar.lz4");
+	simple_string_list_append(&context.ignore_list, "pg_wal.tar.zst");
 	simple_string_list_append(&context.ignore_list, "postgresql.auto.conf");
 	simple_string_list_append(&context.ignore_list, "recovery.signal");
 	simple_string_list_append(&context.ignore_list, "standby.signal");
@@ -556,6 +585,7 @@ verify_backup_directory(verifier_context *context, char *relpath,
 {
 	DIR		   *dir;
 	struct dirent *dirent;
+	SimplePtrList tarFiles = {NULL, NULL};
 
 	dir = opendir(fullpath);
 	if (dir == NULL)
@@ -595,11 +625,16 @@ verify_backup_directory(verifier_context *context, char *relpath,
 			newrelpath = psprintf("%s/%s", relpath, filename);
 
 		if (!should_ignore_relpath(context, newrelpath))
-			verify_backup_file(context, newrelpath, newfullpath);
+			verify_backup_file(context, newrelpath, newfullpath, &tarFiles);
 
 		pfree(newfullpath);
 		pfree(newrelpath);
 	}
+
+	/* Perform the final verification of the tar contents, if any. */
+	Assert(tarFiles.head == NULL || context->format == 't');
+	if (tarFiles.head != NULL)
+		verify_tar_content(context, &tarFiles);
 
 	if (closedir(dir))
 	{
@@ -610,16 +645,18 @@ verify_backup_directory(verifier_context *context, char *relpath,
 }
 
 /*
- * Verify one file (which might actually be a directory or a symlink).
+ * Verify one file (which might actually be a directory, a symlink or a
+ * archive).
  *
  * The arguments to this function have the same meaning as the arguments to
- * verify_backup_directory.
+ * verify_backup_directory. The additional argument outputs the list of tar
+ * archive information if any.
  */
 static void
-verify_backup_file(verifier_context *context, char *relpath, char *fullpath)
+verify_backup_file(verifier_context *context, char *relpath, char *fullpath,
+				   SimplePtrList *tarFiles)
 {
 	struct stat sb;
-	manifest_file *m;
 
 	if (stat(fullpath, &sb) != 0)
 	{
@@ -652,8 +689,36 @@ verify_backup_file(verifier_context *context, char *relpath, char *fullpath)
 		return;
 	}
 
+	/* Do the further verifications */
+	if (context->format == 'p')
+		verify_plain_file(context, relpath, fullpath, sb.st_size);
+	else
+	{
+		/*
+		 * This is preparatory work for the tar format backup verification,
+		 * where we verify only the archive file name and its compression
+		 * type. The final verification will be carried out after listing all
+		 * the archives from the backup directory.
+		 */
+		verify_tar_file(context, relpath, fullpath, sb.st_size, tarFiles);
+	}
+}
+
+/*
+ * Verify one plain file or a symlink.
+ *
+ * The arguments to this function are mostly the same as the
+ * verify_backup_directory. The additional argument is the file size for
+ * verifying against manifest entry.
+ */
+static void
+verify_plain_file(verifier_context *context, char *relpath, char *fullpath,
+				  size_t filesize)
+{
+	manifest_file *m;
+
 	/* Check the backup manifest entry for this file. */
-	m = verify_manifest_entry(context, relpath, sb.st_size);
+	m = verify_manifest_entry(context, relpath, filesize);
 
 	/* Validate the manifest system identifier */
 	if (should_verify_control_data(context->manifest, m))
@@ -674,6 +739,205 @@ verify_backup_file(verifier_context *context, char *relpath, char *fullpath)
 	if (show_progress && !context->skip_checksums &&
 		should_verify_checksum(m))
 		total_size += m->size;
+}
+
+/*
+ * Verify one tar archive file.
+ *
+ * This does not perform a complete verification; it only performs basic
+ * validation of the tar format backup file, detects the compression type, and
+ * appends that information to the tarFiles list. An error will be reported if
+ * the tar archive name or compression type is not as expected.
+ *
+ * The arguments to this function are mostly the same as the
+ * verify_backup_file. The additional argument is the file size for progress
+ * report.
+ */
+static void
+verify_tar_file(verifier_context *context, char *relpath, char *fullpath,
+				int64 filesize, SimplePtrList *tarFiles)
+{
+	Oid			tblspc_oid = InvalidOid;
+	int			file_name_len;
+	int			file_extn_len;
+	pg_compress_algorithm compress_algorithm;
+	tarFile    *tar_file;
+
+	/* Should be tar format backup */
+	Assert(context->format == 't');
+
+	/* Find the compression type of the tar file */
+	if (strstr(relpath, ".tgz") != NULL)
+	{
+		compress_algorithm = PG_COMPRESSION_GZIP;
+		file_extn_len = 4;		/* length of ".tgz" */
+	}
+	else if (strstr(relpath, ".tar.gz") != NULL)
+	{
+		compress_algorithm = PG_COMPRESSION_GZIP;
+		file_extn_len = 7;		/* length of ".tar.gz" */
+	}
+	else if (strstr(relpath, ".tar.lz4") != NULL)
+	{
+		compress_algorithm = PG_COMPRESSION_LZ4;
+		file_extn_len = 8;		/* length of ".tar.lz4" */
+	}
+	else if (strstr(relpath, ".tar.zst") != NULL)
+	{
+		compress_algorithm = PG_COMPRESSION_ZSTD;
+		file_extn_len = 8;		/* length of ".tar.zst" */
+	}
+	else if (strstr(relpath, ".tar") != NULL)
+	{
+		compress_algorithm = PG_COMPRESSION_NONE;
+		file_extn_len = 4;		/* length of ".tar" */
+	}
+	else
+	{
+		report_backup_error(context,
+							"\"%s\" unexpected file in the tar format backup",
+							relpath);
+		return;
+	}
+
+	/*
+	 * We expect tar archive files of backing up the main directory and
+	 * tablespace.
+	 *
+	 * pg_basebackup writes the main data directory to an archive file named
+	 * base.tar and the tablespace directory to <tablespaceoid>.tar, followed
+	 * by a compression type extension such as .gz, .lz4, or .zst.
+	 */
+	file_name_len = strlen(relpath);
+	if (strspn(relpath, "0123456789") == (file_name_len - file_extn_len))
+	{
+		/*
+		 * Since the file matches the <tablespaceoid>.tar format, extract the
+		 * tablespaceoid, which is needed to prepare the paths of the files
+		 * belonging to that tablespace relative to the base directory.
+		 */
+		tblspc_oid = strtoi64(relpath, NULL, 10);
+	}
+	/* Otherwise, it should be a base.tar file; if not, raise an error. */
+	else if (strncmp("base", relpath, file_name_len - file_extn_len) != 0)
+	{
+		report_backup_error(context,
+							"\"%s\" unexpected file in the tar format backup",
+							relpath);
+		return;
+	}
+
+	/*
+	 * Append the information to the list for complete verification at a later
+	 * stage.
+	 */
+	tar_file = pg_malloc(sizeof(tarFile));
+	tar_file->relpath = pstrdup(relpath);
+	tar_file->tblspc_oid = tblspc_oid;
+	tar_file->compress_algorithm = compress_algorithm;
+
+	simple_ptr_list_append(tarFiles, tar_file);
+
+	/* Update statistics for progress report, if necessary */
+	if (show_progress)
+		total_size += filesize;
+}
+
+/*
+ * This is the final part of tar file verification, which prepares the archive
+ * streamer stack according to the tar file compression format for each tar
+ * archive and invokes them for reading, decompressing, and ultimately
+ * verifying the contents.
+ *
+ * The arguments to this function should be a list of valid tar archives to
+ * verify, and the allocation will be freed once the verification is complete.
+ */
+static void
+verify_tar_content(verifier_context *context, SimplePtrList *tarFiles)
+{
+	SimplePtrListCell *cell;
+
+	progress_report(false);
+
+	for (cell = tarFiles->head; cell != NULL; cell = cell->next)
+	{
+		tarFile    *tar_file = (tarFile *) cell->ptr;
+		astreamer  *streamer;
+		char	   *fullpath;
+
+		/* Prepare archive streamer stack */
+		streamer = create_archive_verifier(context,
+										   tar_file->relpath,
+										   tar_file->tblspc_oid,
+										   tar_file->compress_algorithm);
+
+		/* Compute the full pathname to the target file. */
+		fullpath = psprintf("%s/%s", context->backup_directory,
+							tar_file->relpath);
+
+		/* Invoke the streamer for reading, decompressing, and verifying. */
+		verify_tar_content_gut(context,
+							   tar_file->relpath,
+							   fullpath,
+							   streamer);
+
+		/* Cleanup. */
+		pfree(tar_file->relpath);
+		pfree(tar_file);
+		pfree(fullpath);
+
+		astreamer_finalize(streamer);
+		astreamer_free(streamer);
+	}
+	simple_ptr_list_destroy(tarFiles);
+
+	progress_report(true);
+}
+
+/*
+ * Performs the actual work for tar content verification. It reads a given tar
+ * file in predefined chunks and passes it to the streamer, which initiates
+ * routines for decompression (if necessary) and then verifies each member
+ * within the tar archive.
+ */
+static void
+verify_tar_content_gut(verifier_context *context, char *relpath, char *fullpath,
+					   astreamer *streamer)
+{
+	int			fd;
+	int			rc;
+	char	   *buffer;
+
+	pg_log_debug("reading \"%s\"", fullpath);
+
+	/* Open the target file. */
+	if ((fd = open(fullpath, O_RDONLY | PG_BINARY, 0)) < 0)
+	{
+		report_backup_error(context, "could not open file \"%s\": %m",
+							relpath);
+		return;
+	}
+
+	buffer = pg_malloc(READ_CHUNK_SIZE * sizeof(uint8));
+
+	/* Perform the reads */
+	while ((rc = read(fd, buffer, READ_CHUNK_SIZE)) > 0)
+	{
+		astreamer_content(streamer, NULL, buffer, rc, ASTREAMER_UNKNOWN);
+
+		/* Report progress */
+		done_size += rc;
+		progress_report(false);
+	}
+
+	if (rc < 0)
+		report_backup_error(context, "could not read file \"%s\": %m",
+							relpath);
+
+	/* Close the file. */
+	if (close(fd) != 0)
+		report_backup_error(context, "could not close file \"%s\": %m",
+							relpath);
 }
 
 /*
@@ -1042,6 +1306,42 @@ find_backup_format(verifier_context *context)
 	pfree(path);
 
 	return result;
+}
+
+/*
+ * Identifies the necessary steps for verifying the contents of the
+ * provided tar file.
+ */
+static astreamer *
+create_archive_verifier(verifier_context *context, char *archive_name,
+						Oid tblspc_oid, pg_compress_algorithm compress_algo)
+{
+	astreamer  *streamer = NULL;
+
+	/* Should be here only for tar backup */
+	Assert(context->format == 't');
+
+	/*
+	 * To verify the contents of the tar file, the initial step is to parse
+	 * its content.
+	 */
+	streamer = astreamer_verify_content_new(streamer, context, archive_name,
+											tblspc_oid);
+	streamer = astreamer_tar_parser_new(streamer);
+
+	/*
+	 * If the tar file is compressed, we must perform the appropriate
+	 * decompression operation before proceeding with the verification of its
+	 * contents.
+	 */
+	if (compress_algo == PG_COMPRESSION_GZIP)
+		streamer = astreamer_gzip_decompressor_new(streamer);
+	else if (compress_algo == PG_COMPRESSION_LZ4)
+		streamer = astreamer_lz4_decompressor_new(streamer);
+	else if (compress_algo == PG_COMPRESSION_ZSTD)
+		streamer = astreamer_zstd_decompressor_new(streamer);
+
+	return streamer;
 }
 
 /*
