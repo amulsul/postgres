@@ -18,7 +18,6 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#include "common/logging.h"
 #include "common/parse_manifest.h"
 #include "fe_utils/simple_list.h"
 #include "getopt_long.h"
@@ -61,8 +60,6 @@ static void verify_backup_directory(verifier_context *context,
 									char *relpath, char *fullpath);
 static void verify_backup_file(verifier_context *context,
 							   char *relpath, char *fullpath);
-static void verify_control_file(const char *controlpath,
-								uint64 manifest_system_identifier);
 static void report_extra_backup_files(verifier_context *context);
 static void verify_backup_checksums(verifier_context *context);
 static void verify_file_checksum(verifier_context *context,
@@ -625,14 +622,20 @@ verify_backup_file(verifier_context *context, char *relpath, char *fullpath)
 	/* Check the backup manifest entry for this file. */
 	m = verify_manifest_entry(context, relpath, sb.st_size);
 
-	/*
-	 * Validate the manifest system identifier, not available in manifest
-	 * version 1.
-	 */
-	if (context->manifest->version != 1 &&
-		strcmp(relpath, "global/pg_control") == 0 &&
-		m != NULL && m->matched && !m->bad)
-		verify_control_file(fullpath, context->manifest->system_identifier);
+	/* Validate the manifest system identifier */
+	if (should_verify_control_data(context->manifest, m))
+	{
+		ControlFileData *control_file;
+		bool		crc_ok;
+
+		pg_log_debug("reading \"%s\"", fullpath);
+		control_file = get_controlfile_by_exact_path(fullpath, &crc_ok);
+
+		verify_control_data(control_file, fullpath, crc_ok,
+							context->manifest->system_identifier);
+		/* Release memory. */
+		pfree(control_file);
+	}
 
 	/* Update statistics for progress report, if necessary */
 	if (show_progress && !context->skip_checksums &&
@@ -681,18 +684,14 @@ verify_manifest_entry(verifier_context *context, char *relpath, int64 filesize)
 }
 
 /*
- * Sanity check control file and validate system identifier against manifest
- * system identifier.
+ * Sanity check control file data and validate system identifier against
+ * manifest system identifier.
  */
-static void
-verify_control_file(const char *controlpath, uint64 manifest_system_identifier)
+void
+verify_control_data(ControlFileData *control_file,
+					const char *controlpath, bool crc_ok,
+					uint64 manifest_system_identifier)
 {
-	ControlFileData *control_file;
-	bool		crc_ok;
-
-	pg_log_debug("reading \"%s\"", controlpath);
-	control_file = get_controlfile_by_exact_path(controlpath, &crc_ok);
-
 	/* Control file contents not meaningful if CRC is bad. */
 	if (!crc_ok)
 		report_fatal_error("%s: CRC is incorrect", controlpath);
@@ -708,9 +707,6 @@ verify_control_file(const char *controlpath, uint64 manifest_system_identifier)
 						   controlpath,
 						   (unsigned long long) manifest_system_identifier,
 						   (unsigned long long) control_file->system_identifier);
-
-	/* Release memory. */
-	pfree(control_file);
 }
 
 /*

@@ -16,6 +16,7 @@
 
 #include "common/controldata_utils.h"
 #include "common/hashfn_unstable.h"
+#include "common/logging.h"
 #include "common/parse_manifest.h"
 #include "fe_utils/simple_list.h"
 
@@ -43,6 +44,17 @@ typedef struct manifest_file
 #define should_verify_checksum(m) \
 	(((m) != NULL) && ((m)->matched) && !((m)->bad) && \
 	 (((m)->checksum_type) != CHECKSUM_TYPE_NONE))
+
+/*
+ * Validate the manifest system identifier against the control file; this
+ * feature is not available in manifest version 1.  This validation should be
+ * carried out only if the manifest entry validation is completed without any
+ * errors.
+ */
+#define should_verify_control_data(manifest, m) \
+	(((manifest)->version != 1) && \
+	 ((m) != NULL) && ((m)->matched) && !((m)->bad) && \
+	 (strcmp((m)->pathname, "global/pg_control") == 0))
 
 /*
  * Define a hash table which we can use to store information about the files
@@ -103,6 +115,9 @@ extern manifest_file *verify_manifest_entry(verifier_context *context,
 extern void verify_checksum(verifier_context *context, manifest_file *m,
 							pg_checksum_context *checksum_ctx,
 							uint8 *checksumbuf);
+extern void verify_control_data(ControlFileData *control_file,
+								const char *controlpath, bool crc_ok,
+								uint64 manifest_system_identifier);
 
 extern void report_backup_error(verifier_context *context,
 								const char *pg_restrict fmt,...)
