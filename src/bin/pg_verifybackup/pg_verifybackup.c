@@ -787,7 +787,6 @@ verify_file_checksum(verifier_context *context, manifest_file *m,
 	int			rc;
 	size_t		bytes_read = 0;
 	uint8		checksumbuf[PG_CHECKSUM_MAX_LENGTH];
-	int			checksumlen;
 
 	/* Open the target file. */
 	if ((fd = open(fullpath, O_RDONLY | PG_BINARY, 0)) < 0)
@@ -853,8 +852,23 @@ verify_file_checksum(verifier_context *context, manifest_file *m,
 		return;
 	}
 
+	/* Do the final computation and verification. */
+	verify_checksum(context, m, &checksum_ctx, checksumbuf);
+}
+
+/*
+ * A helper function to finalize checksum computation and verify it against the
+ * backup manifest information.
+ */
+void
+verify_checksum(verifier_context *context, manifest_file *m,
+				pg_checksum_context *checksum_ctx, uint8 *checksumbuf)
+{
+	int			checksumlen;
+	const char *relpath = m->pathname;
+
 	/* Get the final checksum. */
-	checksumlen = pg_checksum_final(&checksum_ctx, checksumbuf);
+	checksumlen = pg_checksum_final(checksum_ctx, checksumbuf);
 	if (checksumlen < 0)
 	{
 		report_backup_error(context,

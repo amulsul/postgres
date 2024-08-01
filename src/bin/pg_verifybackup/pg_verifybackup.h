@@ -100,6 +100,9 @@ typedef struct verifier_context
 
 extern manifest_file *verify_manifest_entry(verifier_context *context,
 											char *relpath, int64 filesize);
+extern void verify_checksum(verifier_context *context, manifest_file *m,
+							pg_checksum_context *checksum_ctx,
+							uint8 *checksumbuf);
 
 extern void report_backup_error(verifier_context *context,
 								const char *pg_restrict fmt,...)
