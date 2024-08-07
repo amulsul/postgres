@@ -17,11 +17,11 @@ command_fails_like(
 	qr/no backup directory specified/,
 	'target directory must be specified');
 command_fails_like(
-	[ 'pg_verifybackup', $tempdir ],
+	[ 'pg_verifybackup', '-Fp', $tempdir ],
 	qr/could not open file.*\/backup_manifest\"/,
 	'pg_verifybackup requires a manifest');
 command_fails_like(
-	[ 'pg_verifybackup', $tempdir, $tempdir ],
+	[ 'pg_verifybackup', '-Fp', $tempdir, $tempdir ],
 	qr/too many command-line arguments/,
 	'multiple target directories not allowed');
 
@@ -31,7 +31,7 @@ close($fh);
 
 # but then try to use an alternate, nonexisting manifest
 command_fails_like(
-	[ 'pg_verifybackup', '-m', "$tempdir/not_the_manifest", $tempdir ],
+	[ 'pg_verifybackup', '-Fp', '-m', "$tempdir/not_the_manifest", $tempdir ],
 	qr/could not open file.*\/not_the_manifest\"/,
 	'pg_verifybackup respects -m flag');
 
