@@ -41,7 +41,8 @@ typedef struct manifest_file
 } manifest_file;
 
 #define should_verify_checksum(m) \
-	(((m)->matched) && !((m)->bad) && (((m)->checksum_type) != CHECKSUM_TYPE_NONE))
+	(((m) != NULL) && ((m)->matched) && !((m)->bad) && \
+	 (((m)->checksum_type) != CHECKSUM_TYPE_NONE))
 
 /*
  * Define a hash table which we can use to store information about the files
@@ -96,6 +97,9 @@ typedef struct verifier_context
 	bool		exit_on_error;
 	bool		saw_any_error;
 } verifier_context;
+
+extern manifest_file *verify_manifest_entry(verifier_context *context,
+											char *relpath, int64 filesize);
 
 extern void report_backup_error(verifier_context *context,
 								const char *pg_restrict fmt,...)

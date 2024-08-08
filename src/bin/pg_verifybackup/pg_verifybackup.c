@@ -622,6 +622,32 @@ verify_backup_file(verifier_context *context, char *relpath, char *fullpath)
 		return;
 	}
 
+	/* Check the backup manifest entry for this file. */
+	m = verify_manifest_entry(context, relpath, sb.st_size);
+
+	/*
+	 * Validate the manifest system identifier, not available in manifest
+	 * version 1.
+	 */
+	if (context->manifest->version != 1 &&
+		strcmp(relpath, "global/pg_control") == 0 &&
+		m != NULL && m->matched && !m->bad)
+		verify_control_file(fullpath, context->manifest->system_identifier);
+
+	/* Update statistics for progress report, if necessary */
+	if (show_progress && !context->skip_checksums &&
+		should_verify_checksum(m))
+		total_size += m->size;
+}
+
+/*
+ * Verify file and its size entry in the manifest.
+ */
+manifest_file *
+verify_manifest_entry(verifier_context *context, char *relpath, int64 filesize)
+{
+	manifest_file *m;
+
 	/* Check whether there's an entry in the manifest hash. */
 	m = manifest_files_lookup(context->manifest->files, relpath);
 	if (m == NULL)
@@ -629,33 +655,20 @@ verify_backup_file(verifier_context *context, char *relpath, char *fullpath)
 		report_backup_error(context,
 							"\"%s\" is present on disk but not in the manifest",
 							relpath);
-		return;
+		return NULL;
 	}
 
 	/* Flag this entry as having been encountered in the filesystem. */
 	m->matched = true;
 
 	/* Check that the size matches. */
-	if (m->size != sb.st_size)
+	if (m->size != filesize)
 	{
 		report_backup_error(context,
 							"\"%s\" has size %lld on disk but size %zu in the manifest",
-							relpath, (long long int) sb.st_size, m->size);
+							relpath, (long long int) filesize, m->size);
 		m->bad = true;
 	}
-
-	/*
-	 * Validate the manifest system identifier, not available in manifest
-	 * version 1.
-	 */
-	if (context->manifest->version != 1 &&
-		strcmp(relpath, "global/pg_control") == 0)
-		verify_control_file(fullpath, context->manifest->system_identifier);
-
-	/* Update statistics for progress report, if necessary */
-	if (show_progress && !context->skip_checksums &&
-		should_verify_checksum(m))
-		total_size += m->size;
 
 	/*
 	 * We don't verify checksums at this stage. We first finish verifying that
@@ -663,6 +676,8 @@ verify_backup_file(verifier_context *context, char *relpath, char *fullpath)
 	 * afterwards verify the checksums. That's because computing checksums may
 	 * take a while, and we'd like to report more obvious problems quickly.
 	 */
+
+	return m;
 }
 
 /*
@@ -825,7 +840,7 @@ verify_file_checksum(verifier_context *context, manifest_file *m,
 
 	/*
 	 * Double-check that we read the expected number of bytes from the file.
-	 * Normally, a file size mismatch would be caught in verify_backup_file
+	 * Normally, a file size mismatch would be caught in verify_manifest_entry
 	 * and this check would never be reached, but this provides additional
 	 * safety and clarity in the event of concurrent modifications or
 	 * filesystem misbehavior.
