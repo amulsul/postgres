@@ -173,3 +173,42 @@ simple_ptr_list_append(SimplePtrList *list, void *ptr)
 		list->head = cell;
 	list->tail = cell;
 }
+
+/*
+ * Destroy a pointer list and optionally the pointed-to element
+ */
+static void
+simple_ptr_list_destroy_private(SimplePtrList *list, bool deep)
+{
+	SimplePtrListCell *cell;
+
+	cell = list->head;
+	while (cell != NULL)
+	{
+		SimplePtrListCell *next;
+
+		next = cell->next;
+		if (deep)
+			pg_free(cell->ptr);
+		pg_free(cell);
+		cell = next;
+	}
+}
+
+/*
+ * Destroy a pointer list and the pointed-to element
+ */
+void
+simple_ptr_list_destroy_deep(SimplePtrList *list)
+{
+	simple_ptr_list_destroy_private(list, true);
+}
+
+/*
+ * Destroy only pointer list and not the pointed-to element
+ */
+void
+simple_ptr_list_destroy(SimplePtrList *list)
+{
+	simple_ptr_list_destroy_private(list, false);
+}
