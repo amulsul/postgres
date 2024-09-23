@@ -392,14 +392,22 @@ static void AlterSeqNamespaces(Relation classRel, Relation rel,
 static ObjectAddress ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd,
 										   bool recurse, bool recursing, LOCKMODE lockmode);
 static bool ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
-									 Relation rel, HeapTuple contuple, List **otherrelids,
-									 LOCKMODE lockmode);
+									 const Oid fkrelid, const Oid pkrelid,
+									 HeapTuple contuple, List **otherrelids,
+									 LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
+									 Oid ReferencedParentUpdTrigger,
+									 Oid ReferencingParentInsTrigger,
+									 Oid ReferencingParentUpdTrigger);
 static void AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
 											bool deferrable, bool initdeferred,
 											List **otherrelids);
 static void ATExecAlterChildConstr(Constraint *cmdcon, Relation conrel, Relation tgrel,
-								   Relation rel, HeapTuple contuple, List **otherrelids,
-								   LOCKMODE lockmode);
+								   const Oid fkrelid, const Oid pkrelid,
+								   HeapTuple contuple, List **otherrelids,
+								   LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
+								   Oid ReferencedParentUpdTrigger,
+								   Oid ReferencingParentInsTrigger,
+								   Oid ReferencingParentUpdTrigger);
 static ObjectAddress ATExecValidateConstraint(List **wqueue,
 											  Relation rel, char *constrName,
 											  bool recurse, bool recursing, LOCKMODE lockmode);
@@ -11736,8 +11744,10 @@ ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd, bool recurse,
 		currcon->condeferred != cmdcon->initdeferred ||
 		rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
-		if (ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, rel, contuple,
-									 &otherrelids, lockmode))
+		if (ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, currcon->conrelid,
+									 currcon->confrelid, contuple, &otherrelids,
+									 lockmode, InvalidOid, InvalidOid,
+									 InvalidOid, InvalidOid))
 			ObjectAddressSet(address, ConstraintRelationId, currcon->oid);
 	}
 
@@ -11770,13 +11780,18 @@ ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd, bool recurse,
  */
 static bool
 ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
-						 Relation rel, HeapTuple contuple, List **otherrelids,
-						 LOCKMODE lockmode)
+						 const Oid fkrelid, const Oid pkrelid,
+						 HeapTuple contuple, List **otherrelids,
+						 LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
+						 Oid ReferencedParentUpdTrigger,
+						 Oid ReferencingParentInsTrigger,
+						 Oid ReferencingParentUpdTrigger)
 {
 	Form_pg_constraint currcon;
 	Oid			conoid;
 	Oid			refrelid;
 	bool		changed = false;
+	Relation	rel;
 
 	/* since this function recurses, it could be driven to stack overflow */
 	check_stack_depth();
@@ -11784,6 +11799,8 @@ ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
 	currcon = (Form_pg_constraint) GETSTRUCT(contuple);
 	conoid = currcon->oid;
 	refrelid = currcon->confrelid;
+
+	rel = table_open(currcon->conrelid, lockmode);
 
 	/*
 	 * Update pg_constraint with the flags from cmdcon.
@@ -11830,8 +11847,14 @@ ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
 	 */
 	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ||
 		get_rel_relkind(refrelid) == RELKIND_PARTITIONED_TABLE)
-		ATExecAlterChildConstr(cmdcon, conrel, tgrel, rel, contuple,
-							   otherrelids, lockmode);
+		ATExecAlterChildConstr(cmdcon, conrel, tgrel, fkrelid, pkrelid,
+							   contuple, otherrelids, lockmode,
+							   ReferencedParentDelTrigger,
+							   ReferencedParentUpdTrigger,
+							   ReferencingParentInsTrigger,
+							   ReferencingParentUpdTrigger);
+
+	table_close(rel, NoLock);
 
 	return changed;
 }
@@ -11910,8 +11933,12 @@ AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
  */
 static void
 ATExecAlterChildConstr(Constraint *cmdcon, Relation conrel, Relation tgrel,
-					   Relation rel, HeapTuple contuple, List **otherrelids,
-					   LOCKMODE lockmode)
+					   const Oid fkrelid, const Oid pkrelid,
+					   HeapTuple contuple, List **otherrelids,
+					   LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
+					   Oid ReferencedParentUpdTrigger,
+					   Oid ReferencingParentInsTrigger,
+					   Oid ReferencingParentUpdTrigger)
 {
 	Form_pg_constraint currcon;
 	Oid			conoid;
@@ -11931,15 +11958,12 @@ ATExecAlterChildConstr(Constraint *cmdcon, Relation conrel, Relation tgrel,
 							   true, NULL, 1, &pkey);
 
 	while (HeapTupleIsValid(childtup = systable_getnext(pscan)))
-	{
-		Form_pg_constraint childcon = (Form_pg_constraint) GETSTRUCT(childtup);
-		Relation	childrel;
-
-		childrel = table_open(childcon->conrelid, lockmode);
-		ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, childrel, childtup,
-								 otherrelids, lockmode);
-		table_close(childrel, NoLock);
-	}
+		ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, fkrelid, pkrelid,
+								 childtup, otherrelids, lockmode,
+								 ReferencedParentDelTrigger,
+								 ReferencedParentUpdTrigger,
+								 ReferencingParentInsTrigger,
+								 ReferencingParentUpdTrigger);
 
 	systable_endscan(pscan);
 }
