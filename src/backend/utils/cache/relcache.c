@@ -4701,6 +4701,7 @@ RelationGetFKeyList(Relation relation)
 		info->conoid = constraint->oid;
 		info->conrelid = constraint->conrelid;
 		info->confrelid = constraint->confrelid;
+		info->conenforced = constraint->conenforced;
 
 		DeconstructFkConstraintRow(htup, &info->nkeys,
 								   info->conkey,

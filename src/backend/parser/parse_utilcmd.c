@@ -3963,7 +3963,8 @@ transformConstraintAttrs(CreateStmtContext *cxt, List *constraintList)
 
 			case CONSTR_ATTR_ENFORCED:
 				if (lastprimarycon &&
-					lastprimarycon->contype != CONSTR_CHECK)
+					lastprimarycon->contype != CONSTR_CHECK &&
+					lastprimarycon->contype != CONSTR_FOREIGN)
 					ereport(ERROR,
 							(errcode(ERRCODE_SYNTAX_ERROR),
 							 errmsg("misplaced ENFORCED clause"),
@@ -3979,7 +3980,8 @@ transformConstraintAttrs(CreateStmtContext *cxt, List *constraintList)
 
 			case CONSTR_ATTR_NOT_ENFORCED:
 				if (lastprimarycon &&
-					lastprimarycon->contype != CONSTR_CHECK)
+					lastprimarycon->contype != CONSTR_CHECK &&
+					lastprimarycon->contype != CONSTR_FOREIGN)
 					ereport(ERROR,
 							(errcode(ERRCODE_SYNTAX_ERROR),
 							 errmsg("misplaced NOT ENFORCED clause"),

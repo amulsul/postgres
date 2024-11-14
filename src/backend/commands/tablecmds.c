@@ -389,19 +389,29 @@ static void AlterIndexNamespaces(Relation classRel, Relation rel,
 static void AlterSeqNamespaces(Relation classRel, Relation rel,
 							   Oid oldNspOid, Oid newNspOid, ObjectAddresses *objsMoved,
 							   LOCKMODE lockmode);
-static ObjectAddress ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd,
+static ObjectAddress ATExecAlterConstraint(List **wqueue, Relation rel, AlterTableCmd *cmd,
 										   bool recurse, bool recursing, LOCKMODE lockmode);
-static bool ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
+static bool ATExecAlterConstrRecurse(List **wqueue, Constraint *cmdcon,
+									 Relation conrel, Relation tgrel,
 									 const Oid fkrelid, const Oid pkrelid,
 									 HeapTuple contuple, List **otherrelids,
 									 LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
 									 Oid ReferencedParentUpdTrigger,
 									 Oid ReferencingParentInsTrigger,
 									 Oid ReferencingParentUpdTrigger);
-static void AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
+static void ATExecAlterConstrEnforceability(List **wqueue, Constraint *cmdcon,
+											Relation conrel, Relation tgrel,
+											const Oid fkrelid, const Oid pkrelid,
+											HeapTuple contuple, List **otherrelids,
+											LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
+											Oid ReferencedParentUpdTrigger,
+											Oid ReferencingParentInsTrigger,
+											Oid ReferencingParentUpdTrigger);
+static void AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Oid fkrel,
 											bool deferrable, bool initdeferred,
 											List **otherrelids);
-static void ATExecAlterChildConstr(Constraint *cmdcon, Relation conrel, Relation tgrel,
+static void ATExecAlterChildConstr(List **wqueue, Constraint *cmdcon,
+								   Relation conrel, Relation tgrel,
 								   const Oid fkrelid, const Oid pkrelid,
 								   HeapTuple contuple, List **otherrelids,
 								   LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
@@ -5416,7 +5426,7 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 											   lockmode);
 			break;
 		case AT_AlterConstraint:	/* ALTER CONSTRAINT */
-			address = ATExecAlterConstraint(rel, cmd, false, false, lockmode);
+			address = ATExecAlterConstraint(wqueue, rel, cmd, false, false, lockmode);
 			break;
 		case AT_ValidateConstraint: /* VALIDATE CONSTRAINT */
 			address = ATExecValidateConstraint(wqueue, rel, cmd->name, cmd->recurse,
@@ -10387,7 +10397,7 @@ addFkConstraint(addFkConstraintSides fkside,
 									  fkconstraint->deferrable,
 									  fkconstraint->initdeferred,
 									  fkconstraint->initially_valid,
-									  true,	/* Is Enforced */
+									  fkconstraint->is_enforced,
 									  parentConstr,
 									  RelationGetRelid(rel),
 									  fkattnum,
@@ -10504,20 +10514,22 @@ addFkRecurseReferenced(Constraint *fkconstraint, Relation rel,
 					   Oid parentDelTrigger, Oid parentUpdTrigger,
 					   bool with_period)
 {
-	Oid			deleteTriggerOid,
-				updateTriggerOid;
+	Oid			deleteTriggerOid = InvalidOid,
+				updateTriggerOid = InvalidOid;
 
 	Assert(CheckRelationLockedByMe(pkrel, ShareRowExclusiveLock, true));
 	Assert(CheckRelationLockedByMe(rel, ShareRowExclusiveLock, true));
 
 	/*
-	 * Create the action triggers that enforce the constraint.
+	 * Create action triggers to enforce the constraint, or skip them if the
+	 * constraint is not enforced.
 	 */
-	createForeignKeyActionTriggers(rel, RelationGetRelid(pkrel),
-								   fkconstraint,
-								   parentConstr, indexOid,
-								   parentDelTrigger, parentUpdTrigger,
-								   &deleteTriggerOid, &updateTriggerOid);
+	if (fkconstraint->is_enforced)
+		createForeignKeyActionTriggers(rel, RelationGetRelid(pkrel),
+									   fkconstraint,
+									   parentConstr, indexOid,
+									   parentDelTrigger, parentUpdTrigger,
+									   &deleteTriggerOid, &updateTriggerOid);
 
 	/*
 	 * If the referenced table is partitioned, recurse on ourselves to handle
@@ -10638,8 +10650,8 @@ addFkRecurseReferencing(List **wqueue, Constraint *fkconstraint, Relation rel,
 						Oid parentInsTrigger, Oid parentUpdTrigger,
 						bool with_period)
 {
-	Oid			insertTriggerOid,
-				updateTriggerOid;
+	Oid			insertTriggerOid = InvalidOid,
+				updateTriggerOid = InvalidOid;
 
 	Assert(OidIsValid(parentConstr));
 	Assert(CheckRelationLockedByMe(rel, ShareRowExclusiveLock, true));
@@ -10651,29 +10663,32 @@ addFkRecurseReferencing(List **wqueue, Constraint *fkconstraint, Relation rel,
 				 errmsg("foreign key constraints are not supported on foreign tables")));
 
 	/*
-	 * Add the check triggers to it and, if necessary, schedule it to be
-	 * checked in Phase 3.
+	 * Add check triggers if the constraint is enforced, and if needed,
+	 * schedule them to be checked in Phase 3.
 	 *
 	 * If the relation is partitioned, drill down to do it to its partitions.
 	 */
-	createForeignKeyCheckTriggers(RelationGetRelid(rel),
-								  RelationGetRelid(pkrel),
-								  fkconstraint,
-								  parentConstr,
-								  indexOid,
-								  parentInsTrigger, parentUpdTrigger,
-								  &insertTriggerOid, &updateTriggerOid);
+	if (fkconstraint->is_enforced)
+		createForeignKeyCheckTriggers(RelationGetRelid(rel),
+									  RelationGetRelid(pkrel),
+									  fkconstraint,
+									  parentConstr,
+									  indexOid,
+									  parentInsTrigger, parentUpdTrigger,
+									  &insertTriggerOid, &updateTriggerOid);
 
 	if (rel->rd_rel->relkind == RELKIND_RELATION)
 	{
 		/*
 		 * Tell Phase 3 to check that the constraint is satisfied by existing
-		 * rows. We can skip this during table creation, when requested
-		 * explicitly by specifying NOT VALID in an ADD FOREIGN KEY command,
-		 * and when we're recreating a constraint following a SET DATA TYPE
-		 * operation that did not impugn its validity.
+		 * rows. We can skip this during table creation, when constraint is
+		 * specified as NOT ENFORCED, when requested explicitly by specifying
+		 * NOT VALID in an ADD FOREIGN KEY command, and when we're recreating
+		 * a constraint following a SET DATA TYPE operation that did not
+		 * impugn its validity.
 		 */
-		if (wqueue && !old_check_ok && !fkconstraint->skip_validation)
+		if (wqueue && !old_check_ok && !fkconstraint->skip_validation &&
+			fkconstraint->is_enforced)
 		{
 			NewConstraint *newcon;
 			AlteredTableInfo *tab;
@@ -10908,8 +10923,8 @@ CloneFkReferenced(Relation parentRel, Relation partitionRel)
 		AttrNumber	confdelsetcols[INDEX_MAX_KEYS];
 		Constraint *fkconstraint;
 		ObjectAddress address;
-		Oid			deleteTriggerOid,
-					updateTriggerOid;
+		Oid			deleteTriggerOid = InvalidOid,
+					updateTriggerOid = InvalidOid;
 
 		tuple = SearchSysCache1(CONSTROID, ObjectIdGetDatum(constrOid));
 		if (!HeapTupleIsValid(tuple))
@@ -10959,6 +10974,7 @@ CloneFkReferenced(Relation parentRel, Relation partitionRel)
 		fkconstraint->conname = NameStr(constrForm->conname);
 		fkconstraint->deferrable = constrForm->condeferrable;
 		fkconstraint->initdeferred = constrForm->condeferred;
+		fkconstraint->is_enforced = constrForm->conenforced;
 		fkconstraint->location = -1;
 		fkconstraint->pktable = NULL;
 		/* ->fk_attrs determined below */
@@ -10998,9 +11014,10 @@ CloneFkReferenced(Relation parentRel, Relation partitionRel)
 		 * parent OIDs for similar triggers that will be created on the
 		 * partition in addFkRecurseReferenced().
 		 */
-		GetForeignKeyActionTriggers(trigrel, constrOid,
-									constrForm->confrelid, constrForm->conrelid,
-									&deleteTriggerOid, &updateTriggerOid);
+		if (constrForm->conenforced)
+			GetForeignKeyActionTriggers(trigrel, constrOid,
+										constrForm->confrelid, constrForm->conrelid,
+										&deleteTriggerOid, &updateTriggerOid);
 
 		/* Add this constraint ... */
 		address = addFkConstraint(addFkReferencedSide,
@@ -11166,17 +11183,18 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 			mapped_conkey[i] = attmap->attnums[conkey[i] - 1];
 
 		/*
-		 * Get the "check" triggers belonging to the constraint to pass as
-		 * parent OIDs for similar triggers that will be created on the
-		 * partition in addFkRecurseReferencing().  They are also passed to
-		 * tryAttachPartitionForeignKey() below to simply assign as parents to
-		 * the partition's existing "check" triggers, that is, if the
-		 * corresponding constraints is deemed attachable to the parent
-		 * constraint.
+		 * Get the "check" triggers belonging to the constraint, if it is
+		 * enforced, to pass as parent OIDs for similar triggers that will be
+		 * created on the partition in addFkRecurseReferencing().  They are
+		 * also passed to tryAttachPartitionForeignKey() below to simply
+		 * assign as parents to the partition's existing "check" triggers,
+		 * that is, if the corresponding constraints is deemed attachable to
+		 * the parent constraint.
 		 */
-		GetForeignKeyCheckTriggers(trigrel, constrForm->oid,
-								   constrForm->confrelid, constrForm->conrelid,
-								   &insertTriggerOid, &updateTriggerOid);
+		if (constrForm->conenforced)
+			GetForeignKeyCheckTriggers(trigrel, constrForm->oid,
+									   constrForm->confrelid, constrForm->conrelid,
+									   &insertTriggerOid, &updateTriggerOid);
 
 		/*
 		 * Before creating a new constraint, see whether any existing FKs are
@@ -11218,6 +11236,7 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 		/* ->conname determined below */
 		fkconstraint->deferrable = constrForm->condeferrable;
 		fkconstraint->initdeferred = constrForm->condeferred;
+		fkconstraint->is_enforced = constrForm->conenforced;
 		fkconstraint->location = -1;
 		fkconstraint->pktable = NULL;
 		/* ->fk_attrs determined below */
@@ -11312,8 +11331,6 @@ tryAttachPartitionForeignKey(ForeignKeyCacheInfo *fk,
 	ScanKeyData key;
 	SysScanDesc scan;
 	HeapTuple	trigtup;
-	Oid			insertTriggerOid,
-				updateTriggerOid;
 
 	parentConstrTup = SearchSysCache1(CONSTROID,
 									  ObjectIdGetDatum(parentConstrOid));
@@ -11355,6 +11372,7 @@ tryAttachPartitionForeignKey(ForeignKeyCacheInfo *fk,
 		!partConstr->convalidated ||
 		partConstr->condeferrable != parentConstr->condeferrable ||
 		partConstr->condeferred != parentConstr->condeferred ||
+		partConstr->conenforced != parentConstr->conenforced ||
 		partConstr->confupdtype != parentConstr->confupdtype ||
 		partConstr->confdeltype != parentConstr->confdeltype ||
 		partConstr->confmatchtype != parentConstr->confmatchtype)
@@ -11414,18 +11432,25 @@ tryAttachPartitionForeignKey(ForeignKeyCacheInfo *fk,
 	ConstraintSetParentConstraint(fk->conoid, parentConstrOid, partRelid);
 
 	/*
-	 * Like the constraint, attach partition's "check" triggers to the
-	 * corresponding parent triggers.
+	 * Similar to the constraint, attach the partition's "check" triggers to
+	 * the corresponding parent triggers if the constraint is enforced.
+	 * Non-enforced constraints do not have these triggers.
 	 */
-	GetForeignKeyCheckTriggers(trigrel,
-							   fk->conoid, fk->confrelid, fk->conrelid,
-							   &insertTriggerOid, &updateTriggerOid);
-	Assert(OidIsValid(insertTriggerOid) && OidIsValid(parentInsTrigger));
-	TriggerSetParentTrigger(trigrel, insertTriggerOid, parentInsTrigger,
-							partRelid);
-	Assert(OidIsValid(updateTriggerOid) && OidIsValid(parentUpdTrigger));
-	TriggerSetParentTrigger(trigrel, updateTriggerOid, parentUpdTrigger,
-							partRelid);
+	if (fk->conenforced)
+	{
+		Oid			insertTriggerOid,
+					updateTriggerOid;
+
+		GetForeignKeyCheckTriggers(trigrel,
+								   fk->conoid, fk->confrelid, fk->conrelid,
+								   &insertTriggerOid, &updateTriggerOid);
+		Assert(OidIsValid(insertTriggerOid) && OidIsValid(parentInsTrigger));
+		TriggerSetParentTrigger(trigrel, insertTriggerOid, parentInsTrigger,
+								partRelid);
+		Assert(OidIsValid(updateTriggerOid) && OidIsValid(parentUpdTrigger));
+		TriggerSetParentTrigger(trigrel, updateTriggerOid, parentUpdTrigger,
+								partRelid);
+	}
 
 	/*
 	 * If the referenced table is partitioned, then the partition we're
@@ -11639,8 +11664,8 @@ GetForeignKeyCheckTriggers(Relation trigrel,
  * InvalidObjectAddress.
  */
 static ObjectAddress
-ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd, bool recurse,
-					  bool recursing, LOCKMODE lockmode)
+ATExecAlterConstraint(List **wqueue, Relation rel, AlterTableCmd *cmd,
+					  bool recurse, bool recursing, LOCKMODE lockmode)
 {
 	Constraint *cmdcon;
 	Relation	conrel;
@@ -11742,12 +11767,14 @@ ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd, bool recurse,
 	address = InvalidObjectAddress;
 	if (currcon->condeferrable != cmdcon->deferrable ||
 		currcon->condeferred != cmdcon->initdeferred ||
+		currcon->conenforced != cmdcon->is_enforced ||
 		rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
-		if (ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, currcon->conrelid,
-									 currcon->confrelid, contuple, &otherrelids,
-									 lockmode, InvalidOid, InvalidOid,
-									 InvalidOid, InvalidOid))
+		if (ATExecAlterConstrRecurse(wqueue, cmdcon, conrel, tgrel,
+									 currcon->conrelid, currcon->confrelid,
+									 contuple, &otherrelids, lockmode,
+									 InvalidOid, InvalidOid, InvalidOid,
+									 InvalidOid))
 			ObjectAddressSet(address, ConstraintRelationId, currcon->oid);
 	}
 
@@ -11779,8 +11806,8 @@ ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd, bool recurse,
  * but existing releases don't do that.)
  */
 static bool
-ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
-						 const Oid fkrelid, const Oid pkrelid,
+ATExecAlterConstrRecurse(List **wqueue, Constraint *cmdcon, Relation conrel,
+						 Relation tgrel, const Oid fkrelid, const Oid pkrelid,
 						 HeapTuple contuple, List **otherrelids,
 						 LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
 						 Oid ReferencedParentUpdTrigger,
@@ -11789,18 +11816,17 @@ ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
 {
 	Form_pg_constraint currcon;
 	Oid			conoid;
+	Oid			conrelid;
 	Oid			refrelid;
 	bool		changed = false;
-	Relation	rel;
 
 	/* since this function recurses, it could be driven to stack overflow */
 	check_stack_depth();
 
 	currcon = (Form_pg_constraint) GETSTRUCT(contuple);
 	conoid = currcon->oid;
+	conrelid = currcon->conrelid;
 	refrelid = currcon->confrelid;
-
-	rel = table_open(currcon->conrelid, lockmode);
 
 	/*
 	 * Update pg_constraint with the flags from cmdcon.
@@ -11809,7 +11835,8 @@ ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
 	 * silently do nothing.
 	 */
 	if (currcon->condeferrable != cmdcon->deferrable ||
-		currcon->condeferred != cmdcon->initdeferred)
+		currcon->condeferred != cmdcon->initdeferred ||
+		currcon->conenforced != cmdcon->is_enforced)
 	{
 		HeapTuple	copyTuple;
 		Form_pg_constraint copy_con;
@@ -11818,6 +11845,7 @@ ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
 		copy_con = (Form_pg_constraint) GETSTRUCT(copyTuple);
 		copy_con->condeferrable = cmdcon->deferrable;
 		copy_con->condeferred = cmdcon->initdeferred;
+		copy_con->conenforced = cmdcon->is_enforced;
 		CatalogTupleUpdate(conrel, &copyTuple->t_self, copyTuple);
 
 		InvokeObjectPostAlterHook(ConstraintRelationId,
@@ -11827,36 +11855,212 @@ ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
 		changed = true;
 
 		/* Make new constraint flags visible to others */
-		CacheInvalidateRelcache(rel);
+		CacheInvalidateRelcacheByRelid(conrelid);
+	}
 
+	if (currcon->conenforced != cmdcon->is_enforced)
+	{
+		ATExecAlterConstrEnforceability(wqueue, cmdcon, conrel, tgrel, fkrelid,
+										pkrelid, contuple, otherrelids, lockmode,
+										ReferencedParentDelTrigger,
+										ReferencedParentUpdTrigger,
+										ReferencingParentInsTrigger,
+										ReferencingParentUpdTrigger);
+	}
+	else
+	{
 		/*
 		 * Now we need to update the multiple entries in pg_trigger that
 		 * implement the constraint.
 		 */
-		AlterConstrTriggerDeferrability(conoid, tgrel, rel, cmdcon->deferrable,
-										cmdcon->initdeferred, otherrelids);
+		AlterConstrTriggerDeferrability(conoid, tgrel, conrelid,
+										cmdcon->deferrable,
+										cmdcon->initdeferred,
+										otherrelids);
+
+		/*
+		 * If the table at either end of the constraint is partitioned, we
+		 * need to recurse and handle every constraint that is a child of this
+		 * one.
+		 *
+		 * (This assumes that the recurse flag is forcibly set for partitioned
+		 * tables, and not set for legacy inheritance, though we don't check
+		 * for that here.)
+		 */
+		if (get_rel_relkind(conrelid) == RELKIND_PARTITIONED_TABLE ||
+			get_rel_relkind(refrelid) == RELKIND_PARTITIONED_TABLE)
+			ATExecAlterChildConstr(wqueue, cmdcon, conrel, tgrel, fkrelid,
+								   pkrelid, contuple, otherrelids, lockmode,
+								   ReferencedParentDelTrigger,
+								   ReferencedParentUpdTrigger,
+								   ReferencingParentInsTrigger,
+								   ReferencingParentUpdTrigger);
 	}
 
-	/*
-	 * If the table at either end of the constraint is partitioned, we need to
-	 * recurse and handle every constraint that is a child of this one.
-	 *
-	 * (This assumes that the recurse flag is forcibly set for partitioned
-	 * tables, and not set for legacy inheritance, though we don't check for
-	 * that here.)
-	 */
-	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ||
-		get_rel_relkind(refrelid) == RELKIND_PARTITIONED_TABLE)
-		ATExecAlterChildConstr(cmdcon, conrel, tgrel, fkrelid, pkrelid,
-							   contuple, otherrelids, lockmode,
-							   ReferencedParentDelTrigger,
-							   ReferencedParentUpdTrigger,
-							   ReferencingParentInsTrigger,
-							   ReferencingParentUpdTrigger);
-
-	table_close(rel, NoLock);
-
 	return changed;
+}
+
+/*
+ * A subroutine of ATExecAlterConstrRecurse that updates the enforceability of
+ * a foreign key constraint. Depending on whether the constraint is being set
+ * to enforced or not enforced, it creates or drops the trigger accordingly.
+ *
+ * The arguments to this function have the same meaning as the arguments to
+ * ATExecAlterConstrRecurse.
+ */
+static void
+ATExecAlterConstrEnforceability(List **wqueue, Constraint *cmdcon,
+								Relation conrel, Relation tgrel,
+								const Oid fkrelid, const Oid pkrelid,
+								HeapTuple contuple, List **otherrelids,
+								LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
+								Oid ReferencedParentUpdTrigger,
+								Oid ReferencingParentInsTrigger,
+								Oid ReferencingParentUpdTrigger)
+{
+	Form_pg_constraint currcon;
+	Oid			conoid;
+
+	currcon = (Form_pg_constraint) GETSTRUCT(contuple);
+	conoid = currcon->oid;
+
+	/* Drop triggers */
+	if (!cmdcon->is_enforced)
+	{
+		HeapTuple	tgtuple;
+		ScanKeyData tgkey;
+		SysScanDesc tgscan;
+
+		/*
+		 * When setting a constraint to NOT ENFORCED, the constraint triggers
+		 * need to be dropped. Therefore, we must process the child relations
+		 * first, followed by the parent, to account for dependencies.
+		 */
+		if (get_rel_relkind(currcon->conrelid) == RELKIND_PARTITIONED_TABLE ||
+			get_rel_relkind(currcon->confrelid) == RELKIND_PARTITIONED_TABLE)
+			ATExecAlterChildConstr(wqueue, cmdcon, conrel, tgrel, fkrelid,
+								   pkrelid, contuple, otherrelids, lockmode,
+								   ReferencedParentDelTrigger,
+								   ReferencedParentUpdTrigger,
+								   ReferencingParentInsTrigger,
+								   ReferencingParentUpdTrigger);
+
+		ScanKeyInit(&tgkey,
+					Anum_pg_trigger_tgconstraint,
+					BTEqualStrategyNumber, F_OIDEQ,
+					ObjectIdGetDatum(conoid));
+		tgscan = systable_beginscan(tgrel, TriggerConstraintIndexId, true,
+									NULL, 1, &tgkey);
+		while (HeapTupleIsValid(tgtuple = systable_getnext(tgscan)))
+		{
+			Form_pg_trigger tgform = (Form_pg_trigger) GETSTRUCT(tgtuple);
+			ObjectAddress trigger;
+
+			/*
+			 * Delete only RI_FKey_noaction_del, RI_FKey_noaction_upd,
+			 * RI_FKey_check_ins and RI_FKey_check_upd triggers, but not
+			 * others; see createForeignKeyActionTriggers and
+			 * CreateFKCheckTrigger.
+			 */
+			if (tgform->tgfoid != F_RI_FKEY_NOACTION_DEL &&
+				tgform->tgfoid != F_RI_FKEY_NOACTION_UPD &&
+				tgform->tgfoid != F_RI_FKEY_CHECK_INS &&
+				tgform->tgfoid != F_RI_FKEY_CHECK_UPD)
+				continue;
+
+			deleteDependencyRecordsFor(TriggerRelationId, tgform->oid,
+									   false);
+			/* make dependency deletion visible to performDeletion */
+			CommandCounterIncrement();
+			ObjectAddressSet(trigger, TriggerRelationId, tgform->oid);
+			performDeletion(&trigger, DROP_RESTRICT, 0);
+			/* make trigger drop visible, in case the loop iterates */
+			CommandCounterIncrement();
+		}
+
+		systable_endscan(tgscan);
+	}
+	else						/* Create triggers */
+	{
+		Relation	rel;
+		Oid			ReferencedDelTriggerOid = InvalidOid,
+					ReferencedUpdTriggerOid = InvalidOid,
+					ReferencingInsTriggerOid = InvalidOid,
+					ReferencingUpdTriggerOid = InvalidOid;
+
+		/* Update the foreign key action required for trigger creation. */
+		cmdcon->fk_matchtype = currcon->confmatchtype;
+		cmdcon->fk_upd_action = currcon->confupdtype;
+		cmdcon->fk_del_action = currcon->confdeltype;
+
+		rel = table_open(currcon->conrelid, lockmode);
+
+		/* Create referenced triggers */
+		if (currcon->conrelid == fkrelid)
+			createForeignKeyActionTriggers(rel,
+										   currcon->confrelid,
+										   cmdcon,
+										   conoid,
+										   currcon->conindid,
+										   ReferencedParentDelTrigger,
+										   ReferencedParentUpdTrigger,
+										   &ReferencedDelTriggerOid,
+										   &ReferencedUpdTriggerOid);
+
+		/* Create referencing triggers */
+		if (currcon->confrelid == pkrelid)
+		{
+			createForeignKeyCheckTriggers(currcon->conrelid,
+										  pkrelid,
+										  cmdcon,
+										  conoid,
+										  currcon->conindid,
+										  ReferencingParentInsTrigger,
+										  ReferencingParentUpdTrigger,
+										  &ReferencingInsTriggerOid,
+										  &ReferencingUpdTriggerOid);
+
+			/*
+			 * Tell Phase 3 to check that the constraint is satisfied by
+			 * existing rows, but skip this step if the rows have not been
+			 * validated previously.
+			 */
+			if (rel->rd_rel->relkind == RELKIND_RELATION &&
+				wqueue && currcon->convalidated)
+			{
+				NewConstraint *newcon;
+				AlteredTableInfo *tab;
+
+				tab = ATGetQueueEntry(wqueue, rel);
+
+				newcon = (NewConstraint *) palloc0(sizeof(NewConstraint));
+				newcon->name = pstrdup(NameStr(currcon->conname));
+				newcon->conid = currcon->oid;
+				newcon->contype = CONSTR_FOREIGN;
+				newcon->refrelid = pkrelid;
+				newcon->refindid = currcon->conindid;
+				newcon->conwithperiod = currcon->conperiod;
+				newcon->qual = (Node *) cmdcon;
+
+				tab->constraints = lappend(tab->constraints, newcon);
+			}
+		}
+
+		/*
+		 * If the table at either end of the constraint is partitioned, we
+		 * need to recurse and create triggers for each constraint that is a
+		 * child of this one.
+		 */
+		if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ||
+			get_rel_relkind(currcon->confrelid) == RELKIND_PARTITIONED_TABLE)
+			ATExecAlterChildConstr(wqueue, cmdcon, conrel, tgrel, fkrelid,
+								   pkrelid, contuple, otherrelids, lockmode,
+								   ReferencedDelTriggerOid,
+								   ReferencedUpdTriggerOid,
+								   ReferencingInsTriggerOid,
+								   ReferencingUpdTriggerOid);
+		table_close(rel, NoLock);
+	}
 }
 
 /*
@@ -11867,7 +12071,7 @@ ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
  * ATExecAlterConstrRecurse.
  */
 static void
-AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
+AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Oid fkrel,
 								bool deferrable, bool initdeferred,
 								List **otherrelids)
 {
@@ -11893,7 +12097,7 @@ AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
 		 * other rels that don't have a trigger whose properties change, but
 		 * let's be conservative.)
 		 */
-		if (tgform->tgrelid != RelationGetRelid(rel))
+		if (tgform->tgrelid != fkrel)
 			*otherrelids = list_append_unique_oid(*otherrelids,
 												  tgform->tgrelid);
 
@@ -11932,8 +12136,8 @@ AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
  * ATExecAlterConstrRecurse.
  */
 static void
-ATExecAlterChildConstr(Constraint *cmdcon, Relation conrel, Relation tgrel,
-					   const Oid fkrelid, const Oid pkrelid,
+ATExecAlterChildConstr(List **wqueue, Constraint *cmdcon, Relation conrel,
+					   Relation tgrel, const Oid fkrelid, const Oid pkrelid,
 					   HeapTuple contuple, List **otherrelids,
 					   LOCKMODE lockmode, Oid ReferencedParentDelTrigger,
 					   Oid ReferencedParentUpdTrigger,
@@ -11958,9 +12162,9 @@ ATExecAlterChildConstr(Constraint *cmdcon, Relation conrel, Relation tgrel,
 							   true, NULL, 1, &pkey);
 
 	while (HeapTupleIsValid(childtup = systable_getnext(pscan)))
-		ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, fkrelid, pkrelid,
-								 childtup, otherrelids, lockmode,
-								 ReferencedParentDelTrigger,
+		ATExecAlterConstrRecurse(wqueue, cmdcon, conrel, tgrel,
+								 fkrelid, pkrelid, childtup, otherrelids,
+								 lockmode, ReferencedParentDelTrigger,
 								 ReferencedParentUpdTrigger,
 								 ReferencingParentInsTrigger,
 								 ReferencingParentUpdTrigger);
@@ -12033,25 +12237,33 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
 
 		if (con->contype == CONSTRAINT_FOREIGN)
 		{
-			NewConstraint *newcon;
-			Constraint *fkconstraint;
+			/*
+			 * Queue validation for phase 3 only if constraint is enforced;
+			 * otherwise, adding it to the validation queue won't be very
+			 * effective, as the verification will be skipped.
+			 */
+			if (con->conenforced)
+			{
+				NewConstraint *newcon;
+				Constraint *fkconstraint;
 
-			/* Queue validation for phase 3 */
-			fkconstraint = makeNode(Constraint);
-			/* for now this is all we need */
-			fkconstraint->conname = constrName;
+				/* Queue validation for phase 3 */
+				fkconstraint = makeNode(Constraint);
+				/* for now this is all we need */
+				fkconstraint->conname = constrName;
 
-			newcon = (NewConstraint *) palloc0(sizeof(NewConstraint));
-			newcon->name = constrName;
-			newcon->contype = CONSTR_FOREIGN;
-			newcon->refrelid = con->confrelid;
-			newcon->refindid = con->conindid;
-			newcon->conid = con->oid;
-			newcon->qual = (Node *) fkconstraint;
+				newcon = (NewConstraint *) palloc0(sizeof(NewConstraint));
+				newcon->name = constrName;
+				newcon->contype = CONSTR_FOREIGN;
+				newcon->refrelid = con->confrelid;
+				newcon->refindid = con->conindid;
+				newcon->conid = con->oid;
+				newcon->qual = (Node *) fkconstraint;
 
-			/* Find or create work queue entry for this table */
-			tab = ATGetQueueEntry(wqueue, rel);
-			tab->constraints = lappend(tab->constraints, newcon);
+				/* Find or create work queue entry for this table */
+				tab = ATGetQueueEntry(wqueue, rel);
+				tab->constraints = lappend(tab->constraints, newcon);
+			}
 
 			/*
 			 * We disallow creating invalid foreign keys to or from
@@ -12110,9 +12322,9 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
 			}
 
 			/*
-			 * Queue validation for phase 3 only if constraint is enforced;
-			 * otherwise, adding it to the validation queue won't be very
-			 * effective, as the verification will be skipped.
+			 * Queue validation for phase 3 only if the constraint is
+			 * enforced, for the same reason outlined for the foreign key
+			 * constraint.
 			 */
 			if (con->conenforced)
 			{
@@ -12141,8 +12353,11 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
 		}
 
 		/*
-		 * Update the catalog regardless of enforcement; validation will occur
-		 * only when the constraint is enforced.
+		 * Update the catalog regardless of enforcement; validation will only
+		 * occur when the constraint is enforced. Additionally, when changing a
+		 * non-enforced constraint to enforced, validation will only take place
+		 * if the validation flag is set to true. Otherwise, the user must
+		 * explicitly perform constraint validation.
 		 */
 		copyTuple = heap_copytuple(tuple);
 		copy_con = (Form_pg_constraint) GETSTRUCT(copyTuple);
@@ -19877,8 +20092,6 @@ DetachPartitionFinalize(Relation rel, Relation partRel, bool concurrent,
 		ForeignKeyCacheInfo *fk = lfirst(cell);
 		HeapTuple	contup;
 		Form_pg_constraint conform;
-		Oid			insertTriggerOid,
-					updateTriggerOid;
 
 		contup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(fk->conoid));
 		if (!HeapTupleIsValid(contup))
@@ -19901,17 +20114,25 @@ DetachPartitionFinalize(Relation rel, Relation partRel, bool concurrent,
 
 		/*
 		 * Also, look up the partition's "check" triggers corresponding to the
-		 * constraint being detached and detach them from the parent triggers.
+		 * enforced constraint being detached and detach them from the parent
+		 * triggers. Non-enforced constraints do not have these triggers;
+		 * therefore, this step is not needed.
 		 */
-		GetForeignKeyCheckTriggers(trigrel,
-								   fk->conoid, fk->confrelid, fk->conrelid,
-								   &insertTriggerOid, &updateTriggerOid);
-		Assert(OidIsValid(insertTriggerOid));
-		TriggerSetParentTrigger(trigrel, insertTriggerOid, InvalidOid,
-								RelationGetRelid(partRel));
-		Assert(OidIsValid(updateTriggerOid));
-		TriggerSetParentTrigger(trigrel, updateTriggerOid, InvalidOid,
-								RelationGetRelid(partRel));
+		if (fk->conenforced)
+		{
+			Oid			insertTriggerOid,
+						updateTriggerOid;
+
+			GetForeignKeyCheckTriggers(trigrel,
+									   fk->conoid, fk->confrelid, fk->conrelid,
+									   &insertTriggerOid, &updateTriggerOid);
+			Assert(OidIsValid(insertTriggerOid));
+			TriggerSetParentTrigger(trigrel, insertTriggerOid, InvalidOid,
+									RelationGetRelid(partRel));
+			Assert(OidIsValid(updateTriggerOid));
+			TriggerSetParentTrigger(trigrel, updateTriggerOid, InvalidOid,
+									RelationGetRelid(partRel));
+		}
 
 		/*
 		 * Lastly, create the action triggers on the referenced table, using
@@ -19951,6 +20172,7 @@ DetachPartitionFinalize(Relation rel, Relation partRel, bool concurrent,
 			fkconstraint->conname = pstrdup(NameStr(conform->conname));
 			fkconstraint->deferrable = conform->condeferrable;
 			fkconstraint->initdeferred = conform->condeferred;
+			fkconstraint->is_enforced = conform->conenforced;
 			fkconstraint->skip_validation = true;
 			fkconstraint->initially_valid = true;
 			/* a few irrelevant fields omitted here */
