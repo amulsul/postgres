@@ -1958,6 +1958,7 @@ index_constraint_create(Relation heapRelation,
 								   deferrable,
 								   initdeferred,
 								   true,
+								   true,	/* Is Enforced */
 								   parentConstraintId,
 								   RelationGetRelid(heapRelation),
 								   indexInfo->ii_IndexAttrNumbers,

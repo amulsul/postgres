@@ -455,6 +455,7 @@ makeNotNullConstraint(String *colname)
 	notnull->keys = list_make1(colname);
 	notnull->skip_validation = false;
 	notnull->initially_valid = true;
+	notnull->is_enforced = true;
 
 	return notnull;
 }

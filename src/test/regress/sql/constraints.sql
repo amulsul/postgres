@@ -67,6 +67,18 @@ INSERT INTO CHECK_TBL VALUES (1);
 
 SELECT * FROM CHECK_TBL;
 
+CREATE TABLE NE_CHECK_TBL (x int,
+	CONSTRAINT CHECK_CON CHECK (x > 3) NOT ENFORCED);
+
+INSERT INTO NE_CHECK_TBL VALUES (5);
+INSERT INTO NE_CHECK_TBL VALUES (4);
+INSERT INTO NE_CHECK_TBL VALUES (3);
+INSERT INTO NE_CHECK_TBL VALUES (2);
+INSERT INTO NE_CHECK_TBL VALUES (6);
+INSERT INTO NE_CHECK_TBL VALUES (1);
+
+SELECT * FROM NE_CHECK_TBL;
+
 CREATE SEQUENCE CHECK_SEQ;
 
 CREATE TABLE CHECK2_TBL (x int, y text, z int,
@@ -92,7 +104,8 @@ CREATE TABLE INSERT_TBL (x INT DEFAULT nextval('insert_seq'),
 	y TEXT DEFAULT '-NULL-',
 	z INT DEFAULT -1 * currval('insert_seq'),
 	CONSTRAINT INSERT_TBL_CON CHECK (x >= 3 AND y <> 'check failed' AND x < 8),
-	CHECK (x + z = 0));
+	CHECK (x + z = 0) ENFORCED, /* no change it is a default */
+	CONSTRAINT NE_INSERT_TBL_CON CHECK (x + z = 1) NOT ENFORCED);
 
 INSERT INTO INSERT_TBL(x,z) VALUES (2, -2);
 
@@ -518,6 +531,13 @@ COMMIT;
 
 SELECT * FROM unique_tbl;
 
+-- enforcibility cannot be specified or set for unique constrain
+CREATE TABLE UNIQUE_EN_TBL(i int UNIQUE ENFORCED);
+CREATE TABLE UNIQUE_NOTEN_TBL(i int UNIQUE NOT ENFORCED);
+-- XXX: error message is misleading here
+ALTER TABLE unique_tbl ALTER CONSTRAINT unique_tbl_i_key ENFORCED;
+ALTER TABLE unique_tbl ALTER CONSTRAINT unique_tbl_i_key NOT ENFORCED;
+
 DROP TABLE unique_tbl;
 
 --
@@ -811,6 +831,12 @@ SET SESSION AUTHORIZATION regress_constraint_comments_noaccess;
 COMMENT ON CONSTRAINT the_constraint ON constraint_comments_tbl IS 'no, the comment';
 COMMENT ON CONSTRAINT the_constraint ON DOMAIN constraint_comments_dom IS 'no, another comment';
 RESET SESSION AUTHORIZATION;
+
+-- enforceability not allowed
+CREATE DOMAIN constraint_enforced_dom AS int CONSTRAINT the_constraint CHECK (value > 0) ENFORCED;
+CREATE DOMAIN constraint_not_enforced_dom AS int CONSTRAINT the_constraint CHECK (value > 0) NOT ENFORCED;
+ALTER DOMAIN constraint_comments_dom ADD CONSTRAINT the_constraint CHECK (value > 0) ENFORCED;
+ALTER DOMAIN constraint_comments_dom ADD CONSTRAINT the_constraint CHECK (value > 0) NOT ENFORCED;
 
 DROP TABLE constraint_comments_tbl;
 DROP DOMAIN constraint_comments_dom;

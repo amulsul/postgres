@@ -373,7 +373,7 @@ static void RangeVarCallbackForTruncate(const RangeVar *relation,
 static List *MergeAttributes(List *columns, const List *supers, char relpersistence,
 							 bool is_partition, List **supconstr,
 							 List **supnotnulls);
-static List *MergeCheckConstraint(List *constraints, const char *name, Node *expr);
+static List *MergeCheckConstraint(List *constraints, const char *name, Node *expr, bool is_enforced);
 static void MergeChildAttribute(List *inh_columns, int exist_attno, int newcol_attno, const ColumnDef *newdef);
 static ColumnDef *MergeInheritedAttribute(List *inh_columns, int exist_attno, const ColumnDef *newdef);
 static void MergeAttributesIntoExisting(Relation child_rel, Relation parent_rel, bool ispartition);
@@ -2885,7 +2885,8 @@ MergeAttributes(List *columns, const List *supers, char relpersistence,
 									   name,
 									   RelationGetRelationName(relation))));
 
-				constraints = MergeCheckConstraint(constraints, name, expr);
+				constraints = MergeCheckConstraint(constraints, name, expr,
+												   check[i].ccenforced);
 			}
 		}
 
@@ -3099,7 +3100,7 @@ MergeAttributes(List *columns, const List *supers, char relpersistence,
  * the list.
  */
 static List *
-MergeCheckConstraint(List *constraints, const char *name, Node *expr)
+MergeCheckConstraint(List *constraints, const char *name, Node *expr, bool is_enforced)
 {
 	ListCell   *lc;
 	CookedConstraint *newcon;
@@ -3140,6 +3141,7 @@ MergeCheckConstraint(List *constraints, const char *name, Node *expr)
 	newcon->name = pstrdup(name);
 	newcon->expr = expr;
 	newcon->inhcount = 1;
+	newcon->is_enforced = is_enforced;
 	return lappend(constraints, newcon);
 }
 
@@ -10371,6 +10373,7 @@ addFkConstraint(addFkConstraintSides fkside,
 									  fkconstraint->deferrable,
 									  fkconstraint->initdeferred,
 									  fkconstraint->initially_valid,
+									  true,	/* Is Enforced */
 									  parentConstr,
 									  RelationGetRelid(rel),
 									  fkattnum,
@@ -12040,22 +12043,29 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
 				table_close(childrel, NoLock);
 			}
 
-			/* Queue validation for phase 3 */
-			newcon = (NewConstraint *) palloc0(sizeof(NewConstraint));
-			newcon->name = constrName;
-			newcon->contype = CONSTR_CHECK;
-			newcon->refrelid = InvalidOid;
-			newcon->refindid = InvalidOid;
-			newcon->conid = con->oid;
+			/*
+			 * Queue validation for phase 3 only if constraint is enforced;
+			 * otherwise, adding it to the validation queue won't be very
+			 * effective, as the verification will be skipped.
+			 */
+			if (con->conenforced)
+			{
+				newcon = (NewConstraint *) palloc0(sizeof(NewConstraint));
+				newcon->name = constrName;
+				newcon->contype = CONSTR_CHECK;
+				newcon->refrelid = InvalidOid;
+				newcon->refindid = InvalidOid;
+				newcon->conid = con->oid;
 
-			val = SysCacheGetAttrNotNull(CONSTROID, tuple,
-										 Anum_pg_constraint_conbin);
-			conbin = TextDatumGetCString(val);
-			newcon->qual = (Node *) stringToNode(conbin);
+				val = SysCacheGetAttrNotNull(CONSTROID, tuple,
+											 Anum_pg_constraint_conbin);
+				conbin = TextDatumGetCString(val);
+				newcon->qual = (Node *) stringToNode(conbin);
 
-			/* Find or create work queue entry for this table */
-			tab = ATGetQueueEntry(wqueue, rel);
-			tab->constraints = lappend(tab->constraints, newcon);
+				/* Find or create work queue entry for this table */
+				tab = ATGetQueueEntry(wqueue, rel);
+				tab->constraints = lappend(tab->constraints, newcon);
+			}
 
 			/*
 			 * Invalidate relcache so that others see the new validated
@@ -12065,7 +12075,8 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
 		}
 
 		/*
-		 * Now update the catalog, while we have the door open.
+		 * Update the catalog regardless of enforcement; validation will occur
+		 * only when the constraint is enforced.
 		 */
 		copyTuple = heap_copytuple(tuple);
 		copy_con = (Form_pg_constraint) GETSTRUCT(copyTuple);
@@ -16206,6 +16217,7 @@ constraints_equivalent(HeapTuple a, HeapTuple b, TupleDesc tupleDesc)
 
 	if (acon->condeferrable != bcon->condeferrable ||
 		acon->condeferred != bcon->condeferred ||
+		acon->conenforced != bcon->conenforced ||
 		strcmp(decompile_conbin(a, tupleDesc),
 			   decompile_conbin(b, tupleDesc)) != 0)
 		return false;
@@ -20129,6 +20141,7 @@ DetachAddConstraintIfNeeded(List **wqueue, Relation partRel)
 		n->cooked_expr = nodeToString(make_ands_explicit(constraintExpr));
 		n->initially_valid = true;
 		n->skip_validation = true;
+		n->is_enforced = true;
 		/* It's a re-add, since it nominally already exists */
 		ATAddCheckNNConstraint(wqueue, tab, partRel, n,
 							   true, false, true, ShareUpdateExclusiveLock);

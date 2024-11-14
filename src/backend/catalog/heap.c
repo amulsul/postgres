@@ -103,7 +103,7 @@ static ObjectAddress AddNewRelationType(const char *typeName,
 static void RelationRemoveInheritance(Oid relid);
 static Oid	StoreRelCheck(Relation rel, const char *ccname, Node *expr,
 						  bool is_validated, bool is_local, int16 inhcount,
-						  bool is_no_inherit, bool is_internal);
+						  bool is_no_inherit, bool is_enforced, bool is_internal);
 static void StoreConstraints(Relation rel, List *cooked_constraints,
 							 bool is_internal);
 static bool MergeWithExistingConstraint(Relation rel, const char *ccname, Node *expr,
@@ -2075,7 +2075,7 @@ SetAttrMissing(Oid relid, char *attname, char *value)
 static Oid
 StoreRelCheck(Relation rel, const char *ccname, Node *expr,
 			  bool is_validated, bool is_local, int16 inhcount,
-			  bool is_no_inherit, bool is_internal)
+			  bool is_no_inherit, bool is_enforced, bool is_internal)
 {
 	char	   *ccbin;
 	List	   *varList;
@@ -2141,6 +2141,7 @@ StoreRelCheck(Relation rel, const char *ccname, Node *expr,
 							  false,	/* Is Deferrable */
 							  false,	/* Is Deferred */
 							  is_validated,
+							  is_enforced,	/* Is Enforced */
 							  InvalidOid,	/* no parent constraint */
 							  RelationGetRelid(rel),	/* relation */
 							  attNos,	/* attrs in the constraint */
@@ -2194,6 +2195,7 @@ StoreRelNotNull(Relation rel, const char *nnname, AttrNumber attnum,
 							  false,
 							  false,
 							  is_validated,
+							  true,	/* Is Enforced */
 							  InvalidOid,
 							  RelationGetRelid(rel),
 							  &attnum,
@@ -2264,7 +2266,7 @@ StoreConstraints(Relation rel, List *cooked_constraints, bool is_internal)
 					StoreRelCheck(rel, con->name, con->expr,
 								  !con->skip_validation, con->is_local,
 								  con->inhcount, con->is_no_inherit,
-								  is_internal);
+								  con->is_enforced, is_internal);
 				numchecks++;
 				break;
 
@@ -2406,6 +2408,7 @@ AddRelationNewConstraints(Relation rel,
 		cooked->attnum = colDef->attnum;
 		cooked->expr = expr;
 		cooked->skip_validation = false;
+		cooked->is_enforced = true;
 		cooked->is_local = is_local;
 		cooked->inhcount = is_local ? 0 : 1;
 		cooked->is_no_inherit = false;
@@ -2525,7 +2528,8 @@ AddRelationNewConstraints(Relation rel,
 			 */
 			constrOid =
 				StoreRelCheck(rel, ccname, expr, cdef->initially_valid, is_local,
-							  is_local ? 0 : 1, cdef->is_no_inherit, is_internal);
+							  is_local ? 0 : 1, cdef->is_no_inherit,
+							  cdef->is_enforced, is_internal);
 
 			numchecks++;
 
@@ -2536,6 +2540,7 @@ AddRelationNewConstraints(Relation rel,
 			cooked->attnum = 0;
 			cooked->expr = expr;
 			cooked->skip_validation = cdef->skip_validation;
+			cooked->is_enforced = cdef->is_enforced;
 			cooked->is_local = is_local;
 			cooked->inhcount = is_local ? 0 : 1;
 			cooked->is_no_inherit = cdef->is_no_inherit;

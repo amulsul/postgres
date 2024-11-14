@@ -2591,6 +2591,8 @@ pg_get_constraintdef_worker(Oid constraintId, bool fullCommand,
 		appendStringInfoString(&buf, " DEFERRABLE");
 	if (conForm->condeferred)
 		appendStringInfoString(&buf, " INITIALLY DEFERRED");
+	if (!conForm->conenforced)
+		appendStringInfoString(&buf, " NOT ENFORCED");
 	if (!conForm->convalidated)
 		appendStringInfoString(&buf, " NOT VALID");
 

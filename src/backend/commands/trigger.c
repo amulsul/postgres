@@ -810,6 +810,7 @@ CreateTriggerFiringOn(CreateTrigStmt *stmt, const char *queryString,
 											  stmt->deferrable,
 											  stmt->initdeferred,
 											  true,
+											  true,	/* Is Enforced */
 											  InvalidOid,	/* no parent */
 											  RelationGetRelid(rel),
 											  NULL, /* no conkey */
