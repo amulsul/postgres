@@ -393,15 +393,18 @@ static ObjectAddress ATExecAlterConstraint(List **wqueue, Relation rel,
 										   ATAlterConstraint *cmdcon,
 										   bool recurse, LOCKMODE lockmode);
 static bool ATExecAlterConstraintInternal(List **wqueue, ATAlterConstraint *cmdcon, Relation conrel,
-										  Relation tgrel, Relation rel, HeapTuple contuple,
-										  bool recurse, List **otherrelids, LOCKMODE lockmode);
+										  Relation tgrel, const Oid fkrelid,
+										  const Oid pkrelid, HeapTuple contuple,
+										  bool recurse, List **otherrelids,
+										  LOCKMODE lockmode);
 static void AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
 											bool deferrable, bool initdeferred,
 											List **otherrelids);
 static void ATExecAlterChildConstr(List **wqueue, ATAlterConstraint *cmdcon,
-								   Relation conrel, Relation tgrel, Relation rel,
-								   HeapTuple contuple, bool recurse, List **otherrelids,
-								   LOCKMODE lockmode);
+								   Relation conrel, Relation tgrel,
+								   const Oid fkrelid, const Oid pkrelid,
+								   HeapTuple contuple, bool recurse,
+								   List **otherrelids, LOCKMODE lockmode);
 static ObjectAddress ATExecValidateConstraint(List **wqueue,
 											  Relation rel, char *constrName,
 											  bool recurse, bool recursing, LOCKMODE lockmode);
@@ -12036,7 +12039,8 @@ ATExecAlterConstraint(List **wqueue, Relation rel, ATAlterConstraint *cmdcon,
 	/*
 	 * Do the actual catalog work, and recurse if necessary.
 	 */
-	if (ATExecAlterConstraintInternal(wqueue, cmdcon, conrel, tgrel, rel,
+	if (ATExecAlterConstraintInternal(wqueue, cmdcon, conrel, tgrel,
+									  currcon->conrelid, currcon->confrelid,
 									  contuple, recurse, &otherrelids, lockmode))
 		ObjectAddressSet(address, ConstraintRelationId, currcon->oid);
 
@@ -12069,13 +12073,15 @@ ATExecAlterConstraint(List **wqueue, Relation rel, ATAlterConstraint *cmdcon,
  */
 static bool
 ATExecAlterConstraintInternal(List **wqueue, ATAlterConstraint *cmdcon,
-							  Relation conrel, Relation tgrel, Relation rel,
+							  Relation conrel, Relation tgrel,
+							  const Oid fkrelid, const Oid pkrelid,
 							  HeapTuple contuple, bool recurse,
 							  List **otherrelids, LOCKMODE lockmode)
 {
 	Form_pg_constraint currcon;
 	Oid			refrelid = InvalidOid;
 	bool		changed = false;
+	Relation	rel;
 
 	/* since this function recurses, it could be driven to stack overflow */
 	check_stack_depth();
@@ -12083,6 +12089,8 @@ ATExecAlterConstraintInternal(List **wqueue, ATAlterConstraint *cmdcon,
 	currcon = (Form_pg_constraint) GETSTRUCT(contuple);
 	if (currcon->contype == CONSTRAINT_FOREIGN)
 		refrelid = currcon->confrelid;
+
+	rel = table_open(currcon->conrelid, lockmode);
 
 	/*
 	 * Update pg_constraint with the flags from cmdcon.
@@ -12128,8 +12136,10 @@ ATExecAlterConstraintInternal(List **wqueue, ATAlterConstraint *cmdcon,
 		(rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ||
 		 (OidIsValid(refrelid) &&
 		  get_rel_relkind(refrelid) == RELKIND_PARTITIONED_TABLE)))
-		ATExecAlterChildConstr(wqueue, cmdcon, conrel, tgrel, rel, contuple,
-							   recurse, otherrelids, lockmode);
+		ATExecAlterChildConstr(wqueue, cmdcon, conrel, tgrel, fkrelid, pkrelid,
+							   contuple, recurse, otherrelids, lockmode);
+
+	table_close(rel, NoLock);
 
 	/*
 	 * Update the catalog for inheritability.  No work if the constraint is
@@ -12280,9 +12290,9 @@ AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
  */
 static void
 ATExecAlterChildConstr(List **wqueue, ATAlterConstraint *cmdcon,
-					   Relation conrel, Relation tgrel, Relation rel,
-					   HeapTuple contuple, bool recurse, List **otherrelids,
-					   LOCKMODE lockmode)
+					   Relation conrel, Relation tgrel, const Oid fkrelid,
+					   const Oid pkrelid, HeapTuple contuple, bool recurse,
+					   List **otherrelids, LOCKMODE lockmode)
 {
 	Form_pg_constraint currcon;
 	Oid			conoid;
@@ -12302,15 +12312,9 @@ ATExecAlterChildConstr(List **wqueue, ATAlterConstraint *cmdcon,
 							   true, NULL, 1, &pkey);
 
 	while (HeapTupleIsValid(childtup = systable_getnext(pscan)))
-	{
-		Form_pg_constraint childcon = (Form_pg_constraint) GETSTRUCT(childtup);
-		Relation	childrel;
-
-		childrel = table_open(childcon->conrelid, lockmode);
-		ATExecAlterConstraintInternal(wqueue, cmdcon, conrel, tgrel, childrel,
-									  childtup, recurse, otherrelids, lockmode);
-		table_close(childrel, NoLock);
-	}
+		ATExecAlterConstraintInternal(wqueue, cmdcon, conrel, tgrel, fkrelid,
+									  pkrelid, childtup, recurse, otherrelids,
+									  lockmode);
 
 	systable_endscan(pscan);
 }
