@@ -392,13 +392,15 @@ static void AlterSeqNamespaces(Relation classRel, Relation rel,
 static ObjectAddress ATExecAlterConstraint(Relation rel, AlterConstraintStmt *cmdcon,
 										   bool recurse, bool recursing, LOCKMODE lockmode);
 static bool ATExecAlterConstrRecurse(AlterConstraintStmt *cmdcon, Relation conrel, Relation tgrel,
-									 Relation rel, HeapTuple contuple, List **otherrelids,
+									 const Oid fkrelid, const Oid pkrelid,
+									 HeapTuple contuple, List **otherrelids,
 									 LOCKMODE lockmode);
 static void AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
 											bool deferrable, bool initdeferred,
 											List **otherrelids);
 static void ATExecAlterChildConstr(AlterConstraintStmt *cmdcon, Relation conrel, Relation tgrel,
-								   Relation rel, HeapTuple contuple, List **otherrelids,
+								   const Oid fkrelid, const Oid pkrelid,
+								   HeapTuple contuple, List **otherrelids,
 								   LOCKMODE lockmode);
 static ObjectAddress ATExecValidateConstraint(List **wqueue,
 											  Relation rel, char *constrName,
@@ -11906,8 +11908,9 @@ ATExecAlterConstraint(Relation rel, AlterConstraintStmt *cmdcon, bool recurse,
 		currcon->condeferred != cmdcon->initdeferred ||
 		rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
-		if (ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, rel, contuple,
-									 &otherrelids, lockmode))
+		if (ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, currcon->conrelid,
+									 currcon->confrelid, contuple, &otherrelids,
+									 lockmode))
 			ObjectAddressSet(address, ConstraintRelationId, currcon->oid);
 	}
 
@@ -11940,13 +11943,15 @@ ATExecAlterConstraint(Relation rel, AlterConstraintStmt *cmdcon, bool recurse,
  */
 static bool
 ATExecAlterConstrRecurse(AlterConstraintStmt *cmdcon, Relation conrel, Relation tgrel,
-						 Relation rel, HeapTuple contuple, List **otherrelids,
+						 const Oid fkrelid, const Oid pkrelid,
+						 HeapTuple contuple, List **otherrelids,
 						 LOCKMODE lockmode)
 {
 	Form_pg_constraint currcon;
 	Oid			conoid;
 	Oid			refrelid;
 	bool		changed = false;
+	Relation	rel;
 
 	/* since this function recurses, it could be driven to stack overflow */
 	check_stack_depth();
@@ -11954,6 +11959,8 @@ ATExecAlterConstrRecurse(AlterConstraintStmt *cmdcon, Relation conrel, Relation 
 	currcon = (Form_pg_constraint) GETSTRUCT(contuple);
 	conoid = currcon->oid;
 	refrelid = currcon->confrelid;
+
+	rel = table_open(currcon->conrelid, lockmode);
 
 	/*
 	 * Update pg_constraint with the flags from cmdcon.
@@ -12000,8 +12007,9 @@ ATExecAlterConstrRecurse(AlterConstraintStmt *cmdcon, Relation conrel, Relation 
 	 */
 	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ||
 		get_rel_relkind(refrelid) == RELKIND_PARTITIONED_TABLE)
-		ATExecAlterChildConstr(cmdcon, conrel, tgrel, rel, contuple,
-							   otherrelids, lockmode);
+		ATExecAlterChildConstr(cmdcon, conrel, tgrel, fkrelid, pkrelid,
+							   contuple, otherrelids, lockmode);
+	table_close(rel, NoLock);
 
 	return changed;
 }
@@ -12080,7 +12088,8 @@ AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
  */
 static void
 ATExecAlterChildConstr(AlterConstraintStmt *cmdcon, Relation conrel, Relation tgrel,
-					   Relation rel, HeapTuple contuple, List **otherrelids,
+					   const Oid fkrelid, const Oid pkrelid,
+					   HeapTuple contuple, List **otherrelids,
 					   LOCKMODE lockmode)
 {
 	Form_pg_constraint currcon;
@@ -12101,15 +12110,8 @@ ATExecAlterChildConstr(AlterConstraintStmt *cmdcon, Relation conrel, Relation tg
 							   true, NULL, 1, &pkey);
 
 	while (HeapTupleIsValid(childtup = systable_getnext(pscan)))
-	{
-		Form_pg_constraint childcon = (Form_pg_constraint) GETSTRUCT(childtup);
-		Relation	childrel;
-
-		childrel = table_open(childcon->conrelid, lockmode);
-		ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, childrel, childtup,
-								 otherrelids, lockmode);
-		table_close(childrel, NoLock);
-	}
+		ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, fkrelid, pkrelid,
+								 childtup, otherrelids, lockmode);
 
 	systable_endscan(pscan);
 }
