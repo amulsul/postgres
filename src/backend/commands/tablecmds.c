@@ -11207,8 +11207,8 @@ CloneFkReferencing(List **wqueue, Relation parentRel, Relation partRel)
 		Oid			indexOid;
 		ObjectAddress address;
 		ListCell   *lc;
-		Oid			insertTriggerOid,
-					updateTriggerOid;
+		Oid			insertTriggerOid = InvalidOid,
+					updateTriggerOid = InvalidOid;
 		bool		with_period;
 
 		tuple = SearchSysCache1(CONSTROID, ObjectIdGetDatum(parentConstrOid));
@@ -11422,7 +11422,6 @@ tryAttachPartitionForeignKey(List **wqueue,
 	if (OidIsValid(partConstr->conparentid) ||
 		partConstr->condeferrable != parentConstr->condeferrable ||
 		partConstr->condeferred != parentConstr->condeferred ||
-		partConstr->conenforced != parentConstr->conenforced ||
 		partConstr->confupdtype != parentConstr->confupdtype ||
 		partConstr->confdeltype != parentConstr->confdeltype ||
 		partConstr->confmatchtype != parentConstr->confmatchtype)
@@ -11467,6 +11466,8 @@ AttachPartitionForeignKey(List **wqueue,
 	Oid			partConstrFrelid;
 	Oid			partConstrRelid;
 	bool		parentConstrIsEnforced;
+	bool		partConstrIsEnforced;
+	bool		partConstrParentIsSet;
 	Oid			insertTriggerOid,
 				updateTriggerOid;
 
@@ -11484,8 +11485,78 @@ AttachPartitionForeignKey(List **wqueue,
 	if (!HeapTupleIsValid(partcontup))
 		elog(ERROR, "cache lookup failed for constraint %u", partConstrOid);
 	partConstr = (Form_pg_constraint) GETSTRUCT(partcontup);
+	partConstrIsEnforced = partConstr->conenforced;
 	partConstrFrelid = partConstr->confrelid;
 	partConstrRelid = partConstr->conrelid;
+
+	/*
+	 * When the enforcibility of both constraints is the same, no special
+	 * action is taken, and the flow remains unchanged. However, there are two
+	 * scenarios to consider when it differs:
+	 *
+	 * 1. Parent constraint is not-enforced and child constraint is enforced:
+	 *
+	 * This is allowed because the not-enforced parent constraint does not
+	 * have triggers, so no redundancy issues arise with the child constraint,
+	 * even if it is enforced. In this case, we allow the child constraint to
+	 * remain enforced and keep its trigger intact. This ensures that
+	 * referential integrity checks for the child continue as before, even
+	 * with the parent constraint not enforced. The relationship between the
+	 * two constraints is maintained by setting the parent constraint, which
+	 * enables us to locate the child constraint. This is important if the
+	 * parent constraint is later changed to enforced, at which point the
+	 * necessary trigger will be created for the parent. Any potential
+	 * redundancy from these triggers will be addressed accordingly.
+	 *
+	 * 2. Parent constraint is enforced and child constraint is not-enforced:
+	 *
+	 * This is not allowed, as it would violate referential integrity. In such
+	 * cases, the child constraint will first be made enforced before merging
+	 * it with the enforced parent constraint. Then, action triggers and
+	 * constraint redundancy will be handled in the usual manner, similar to
+	 * how two enforced constraints are merged.
+	 */
+	if (!parentConstrIsEnforced && partConstrIsEnforced)
+	{
+		ReleaseSysCache(partcontup);
+		ReleaseSysCache(parentConstrTup);
+
+		ConstraintSetParentConstraint(partConstrOid, parentConstrOid,
+									  RelationGetRelid(partition));
+		CommandCounterIncrement();
+
+		return;
+	}
+	else if (parentConstrIsEnforced && !partConstrIsEnforced)
+	{
+		AlterConstraintStmt *cmdcon = makeNode(AlterConstraintStmt);
+		Relation	conrel;
+		List	   *otherrelids = NIL;
+
+		cmdcon->conname = NameStr(partConstr->conname);
+		cmdcon->deferrable = partConstr->condeferrable;
+		cmdcon->initdeferred = partConstr->condeferred;
+		cmdcon->alterEnforceability = true;
+		cmdcon->is_enforced = true;
+
+		conrel = table_open(ConstraintRelationId, RowExclusiveLock);
+
+		ATExecAlterConstrRecurse(cmdcon, conrel, trigrel, partConstr->conrelid,
+								 partConstr->confrelid, partcontup, &otherrelids,
+								 AccessExclusiveLock, InvalidOid, InvalidOid,
+								 InvalidOid, InvalidOid);
+
+		table_close(conrel, RowExclusiveLock);
+
+		CommandCounterIncrement();
+	}
+
+	/*
+	 * The constraint parent shouldn't be set beforehand, or if it's already
+	 * set, it should be the specified parent.
+	 */
+	partConstrParentIsSet = OidIsValid(partConstr->conparentid);
+	Assert(!partConstrParentIsSet || partConstr->conparentid == parentConstrOid);
 
 	/*
 	 * Will we need to validate this constraint?   A valid parent constraint
@@ -11506,8 +11577,10 @@ AttachPartitionForeignKey(List **wqueue,
 	DropForeignKeyConstraintTriggers(trigrel, partConstrOid, partConstrFrelid,
 									 partConstrRelid);
 
-	ConstraintSetParentConstraint(partConstrOid, parentConstrOid,
-								  RelationGetRelid(partition));
+	/* Skip if the parent is already set */
+	if (!partConstrParentIsSet)
+		ConstraintSetParentConstraint(partConstrOid, parentConstrOid,
+									  RelationGetRelid(partition));
 
 	/*
 	 * Like the constraint, attach partition's "check" triggers to the
@@ -11553,7 +11626,7 @@ AttachPartitionForeignKey(List **wqueue,
 	CommandCounterIncrement();
 
 	/* If validation is needed, put it in the queue now. */
-	if (queueValidation)
+	if (wqueue && queueValidation)
 	{
 		Relation	conrel;
 
@@ -12163,6 +12236,17 @@ ATExecAlterConstrEnforceability(AlterConstraintStmt *cmdcon, Relation conrel,
 
 		/* Drop all the triggers */
 		DropForeignKeyConstraintTriggers(tgrel, conoid, InvalidOid, InvalidOid);
+
+		/*
+		 * If the referenced table is partitioned, the child constraint we're
+		 * changing to not-enforced may have additional pg_constraint rows and
+		 * action triggers that remain untouched while this child constraint
+		 * is attached to the not-enforced parent. These must now be removed.
+		 * For more details, see AttachPartitionForeignKey().
+		 */
+		if (OidIsValid(currcon->conparentid) &&
+			get_rel_relkind(currcon->confrelid) == RELKIND_PARTITIONED_TABLE)
+			RemoveInheritedConstraint(conrel, tgrel, currcon->conrelid, conoid);
 	}
 	else						/* Create triggers */
 	{
@@ -12223,13 +12307,42 @@ ATExecAlterConstrEnforceability(AlterConstraintStmt *cmdcon, Relation conrel,
 									   true, NULL, 1, &pkey);
 
 			while (HeapTupleIsValid(childtup = systable_getnext(pscan)))
-				ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, fkrelid, pkrelid,
-										 childtup, otherrelids, lockmode,
-										 ReferencedDelTriggerOid,
-										 ReferencedUpdTriggerOid,
-										 ReferencingInsTriggerOid,
-										 ReferencingUpdTriggerOid);
+			{
+				Form_pg_constraint childcon;
 
+				childcon = (Form_pg_constraint) GETSTRUCT(childtup);
+
+				if (childcon->conenforced)
+				{
+
+					/*
+					 * The child constraint is attached to the parent
+					 * constraint, which is already enforced. Now, as the
+					 * parent constraint is being modified to be enforced, some
+					 * constraints and action triggers on the child table may
+					 * become redundant and need to be removed.
+					 */
+					if (currcon->confrelid == pkrelid)
+					{
+						Relation rel = table_open(childcon->conrelid, lockmode);
+
+						AttachPartitionForeignKey(NULL, rel, childcon->oid,
+												  conoid,
+												  ReferencingInsTriggerOid,
+												  ReferencingUpdTriggerOid,
+												  tgrel);
+
+						table_close(rel, NoLock);
+					}
+				}
+				else
+					ATExecAlterConstrRecurse(cmdcon, conrel, tgrel, fkrelid,
+											 pkrelid, childtup, otherrelids,
+											 lockmode, ReferencedDelTriggerOid,
+											 ReferencedUpdTriggerOid,
+											 ReferencingInsTriggerOid,
+											 ReferencingUpdTriggerOid);
+			}
 			systable_endscan(pscan);
 		}
 	}
@@ -20390,7 +20503,9 @@ DetachPartitionFinalize(Relation rel, Relation partRel, bool concurrent,
 	{
 		ForeignKeyCacheInfo *fk = lfirst(cell);
 		HeapTuple	contup;
+		HeapTuple	parentContup;
 		Form_pg_constraint conform;
+		Oid			parentConstrIsEnforced;
 
 		contup = SearchSysCache1(CONSTROID, ObjectIdGetDatum(fk->conoid));
 		if (!HeapTupleIsValid(contup))
@@ -20409,11 +20524,33 @@ DetachPartitionFinalize(Relation rel, Relation partRel, bool concurrent,
 			continue;
 		}
 
+		/* Get the enforcibility of the parent constraint */
+		parentContup = SearchSysCache1(CONSTROID,
+									   ObjectIdGetDatum(conform->conparentid));
+		if (!HeapTupleIsValid(parentContup))
+			elog(ERROR, "cache lookup failed for constraint %u",
+				 conform->conparentid);
+		parentConstrIsEnforced =
+			((Form_pg_constraint) GETSTRUCT(parentContup))->conenforced;
+		ReleaseSysCache(parentContup);
+
 		/*
 		 * The constraint on this table must be marked no longer a child of
 		 * the parent's constraint, as do its check triggers.
 		 */
 		ConstraintSetParentConstraint(fk->conoid, InvalidOid, InvalidOid);
+
+		/*
+		 * Unsetting the parent is sufficient when the parent constraint is
+		 * not enforced and the child constraint is enforced, as we link them
+		 * by setting the constraint parent, while leaving the rest unchanged.
+		 * For more details, see AttachPartitionForeignKey().
+		 */
+		if (!parentConstrIsEnforced && fk->conenforced)
+		{
+			ReleaseSysCache(contup);
+			continue;
+		}
 
 		/*
 		 * Also, look up the partition's "check" triggers corresponding to the

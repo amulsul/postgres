@@ -1241,8 +1241,22 @@ ALTER TABLE fk_partitioned_fk_3 DROP COLUMN fdrop1, DROP COLUMN fdrop2,
 	DROP COLUMN fdrop3, DROP COLUMN fdrop4;
 CREATE TABLE fk_partitioned_fk_3_0 PARTITION OF fk_partitioned_fk_3 FOR VALUES WITH (MODULUS 5, REMAINDER 0);
 CREATE TABLE fk_partitioned_fk_3_1 PARTITION OF fk_partitioned_fk_3 FOR VALUES WITH (MODULUS 5, REMAINDER 1);
+-- Merge the not-enforced parent constraint with the enforced and not-enforced child constraints.
+ALTER TABLE fk_partitioned_fk_3_0 ADD FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk ENFORCED;
+ALTER TABLE fk_partitioned_fk_3_1 ADD FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk NOT ENFORCED;
+ALTER TABLE fk_partitioned_fk_3 ADD FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk NOT ENFORCED;
+
+SELECT conname, conenforced, convalidated, conrelid::regclass FROM pg_constraint
+WHERE conrelid::regclass::text like 'fk_partitioned_fk_3%' ORDER BY oid;
+
+-- Merging an enforced parent constraint (validated) with a not-enforced child
+-- constraint will implicitly change the child constraint to enforced and apply
+-- the validation as well.
 ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_3
   FOR VALUES FROM (2000,2000) TO (3000,3000);
+
+SELECT conname, conenforced, convalidated, conrelid::regclass FROM pg_constraint
+WHERE conrelid::regclass::text like 'fk_partitioned_fk_3%' ORDER BY oid;
 
 -- Creating a foreign key with ONLY on a partitioned table referencing
 -- a non-partitioned table fails.
