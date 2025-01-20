@@ -2513,8 +2513,14 @@ typedef struct AlterConstraintStmt
 
 	char	   *conname;		/* Constraint name */
 
+	bool		alterDeferrability; /* True when any of the following flags
+									 * are specifically set for modification */
 	bool		deferrable;		/* DEFERRABLE? */
 	bool		initdeferred;	/* INITIALLY DEFERRED? */
+
+	bool		alterEnforceability;	/* True when following flag is
+										 * specifically set for modification */
+	bool		is_enforced;	/* enforced constraint? */
 } AlterConstraintStmt;
 
 
