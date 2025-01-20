@@ -571,7 +571,7 @@ static void createForeignKeyCheckTriggers(Oid myRelOid, Oid refRelOid,
 										  Oid indexOid,
 										  Oid parentInsTrigger, Oid parentUpdTrigger,
 										  Oid *insertTrigOid, Oid *updateTrigOid);
-static void createForeignKeyActionTriggers(Relation rel, Oid refRelOid,
+static void createForeignKeyActionTriggers(Oid myRelOid, Oid refRelOid,
 										   Constraint *fkconstraint, Oid constraintOid,
 										   Oid indexOid,
 										   Oid parentDelTrigger, Oid parentUpdTrigger,
@@ -10679,7 +10679,8 @@ addFkRecurseReferenced(Constraint *fkconstraint, Relation rel,
 	/*
 	 * Create the action triggers that enforce the constraint.
 	 */
-	createForeignKeyActionTriggers(rel, RelationGetRelid(pkrel),
+	createForeignKeyActionTriggers(RelationGetRelid(rel),
+								   RelationGetRelid(pkrel),
 								   fkconstraint,
 								   parentConstr, indexOid,
 								   parentDelTrigger, parentUpdTrigger,
@@ -13145,10 +13146,11 @@ CreateFKCheckTrigger(Oid myRelOid, Oid refRelOid, Constraint *fkconstraint,
  * *updateTrigOid.
  */
 static void
-createForeignKeyActionTriggers(Relation rel, Oid refRelOid, Constraint *fkconstraint,
-							   Oid constraintOid, Oid indexOid,
-							   Oid parentDelTrigger, Oid parentUpdTrigger,
-							   Oid *deleteTrigOid, Oid *updateTrigOid)
+createForeignKeyActionTriggers(Oid myRelOid, Oid refRelOid,
+							   Constraint *fkconstraint, Oid constraintOid,
+							   Oid indexOid, Oid parentDelTrigger,
+							   Oid parentUpdTrigger, Oid *deleteTrigOid,
+							   Oid *updateTrigOid)
 {
 	CreateTrigStmt *fk_trigger;
 	ObjectAddress trigAddress;
@@ -13204,8 +13206,7 @@ createForeignKeyActionTriggers(Relation rel, Oid refRelOid, Constraint *fkconstr
 			break;
 	}
 
-	trigAddress = CreateTrigger(fk_trigger, NULL, refRelOid,
-								RelationGetRelid(rel),
+	trigAddress = CreateTrigger(fk_trigger, NULL, refRelOid, myRelOid,
 								constraintOid, indexOid, InvalidOid,
 								parentDelTrigger, NULL, true, false);
 	if (deleteTrigOid)
@@ -13265,8 +13266,7 @@ createForeignKeyActionTriggers(Relation rel, Oid refRelOid, Constraint *fkconstr
 			break;
 	}
 
-	trigAddress = CreateTrigger(fk_trigger, NULL, refRelOid,
-								RelationGetRelid(rel),
+	trigAddress = CreateTrigger(fk_trigger, NULL, refRelOid, myRelOid,
 								constraintOid, indexOid, InvalidOid,
 								parentUpdTrigger, NULL, true, false);
 	if (updateTrigOid)
