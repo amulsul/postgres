@@ -66,6 +66,7 @@ AllocSetFreeList
 AllocateDesc
 AllocateDescKind
 AlterCollationStmt
+AlterConstraintStmt
 AlterDatabaseRefreshCollStmt
 AlterDatabaseSetStmt
 AlterDatabaseStmt
