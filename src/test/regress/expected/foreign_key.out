@@ -383,8 +383,42 @@ INSERT INTO FKTABLE VALUES (1, NULL);
 ALTER TABLE FKTABLE ADD FOREIGN KEY(ftest1, ftest2) REFERENCES PKTABLE MATCH FULL;
 ERROR:  insert or update on table "fktable" violates foreign key constraint "fktable_ftest1_ftest2_fkey"
 DETAIL:  MATCH FULL does not allow mixing of null and nonnull key values.
--- NOT ENFORCED will bypass the initial check.
+-- NOT ENFORCED will bypass the initial check
 ALTER TABLE FKTABLE ADD FOREIGN KEY(ftest1, ftest2) REFERENCES PKTABLE MATCH FULL NOT ENFORCED;
+-- Modifying other attributes of a constraint should not affect its enforceability, and vice versa
+ALTER TABLE FKTABLE ALTER CONSTRAINT fktable_ftest1_ftest2_fkey DEFERRABLE INITIALLY DEFERRED;
+SELECT condeferrable, condeferred, conenforced, convalidated
+FROM pg_constraint WHERE conname = 'fktable_ftest1_ftest2_fkey';
+ condeferrable | condeferred | conenforced | convalidated 
+---------------+-------------+-------------+--------------
+ t             | t           | f           | f
+(1 row)
+
+ALTER TABLE FKTABLE ALTER CONSTRAINT fktable_ftest1_ftest2_fkey NOT ENFORCED;
+SELECT condeferrable, condeferred, conenforced, convalidated
+FROM pg_constraint WHERE conname = 'fktable_ftest1_ftest2_fkey';
+ condeferrable | condeferred | conenforced | convalidated 
+---------------+-------------+-------------+--------------
+ t             | t           | f           | f
+(1 row)
+
+ALTER TABLE FKTABLE ALTER CONSTRAINT fktable_ftest1_ftest2_fkey ENFORCED;
+SELECT condeferrable, condeferred, conenforced, convalidated
+FROM pg_constraint WHERE conname = 'fktable_ftest1_ftest2_fkey';
+ condeferrable | condeferred | conenforced | convalidated 
+---------------+-------------+-------------+--------------
+ t             | t           | t           | f
+(1 row)
+
+-- Can change enforceability and deferrability togher
+ALTER TABLE FKTABLE ALTER CONSTRAINT fktable_ftest1_ftest2_fkey ENFORCED NOT DEFERRABLE;
+SELECT condeferrable, condeferred, conenforced, convalidated
+FROM pg_constraint WHERE conname = 'fktable_ftest1_ftest2_fkey';
+ condeferrable | condeferred | conenforced | convalidated 
+---------------+-------------+-------------+--------------
+ f             | f           | t           | f
+(1 row)
+
 DROP TABLE FKTABLE;
 DROP TABLE PKTABLE;
 -- MATCH SIMPLE

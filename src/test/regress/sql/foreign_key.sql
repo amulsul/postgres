@@ -257,8 +257,26 @@ INSERT INTO FKTABLE VALUES (1, NULL);
 
 ALTER TABLE FKTABLE ADD FOREIGN KEY(ftest1, ftest2) REFERENCES PKTABLE MATCH FULL;
 
--- NOT ENFORCED will bypass the initial check.
+-- NOT ENFORCED will bypass the initial check
 ALTER TABLE FKTABLE ADD FOREIGN KEY(ftest1, ftest2) REFERENCES PKTABLE MATCH FULL NOT ENFORCED;
+
+-- Modifying other attributes of a constraint should not affect its enforceability, and vice versa
+ALTER TABLE FKTABLE ALTER CONSTRAINT fktable_ftest1_ftest2_fkey DEFERRABLE INITIALLY DEFERRED;
+SELECT condeferrable, condeferred, conenforced, convalidated
+FROM pg_constraint WHERE conname = 'fktable_ftest1_ftest2_fkey';
+
+ALTER TABLE FKTABLE ALTER CONSTRAINT fktable_ftest1_ftest2_fkey NOT ENFORCED;
+SELECT condeferrable, condeferred, conenforced, convalidated
+FROM pg_constraint WHERE conname = 'fktable_ftest1_ftest2_fkey';
+
+ALTER TABLE FKTABLE ALTER CONSTRAINT fktable_ftest1_ftest2_fkey ENFORCED;
+SELECT condeferrable, condeferred, conenforced, convalidated
+FROM pg_constraint WHERE conname = 'fktable_ftest1_ftest2_fkey';
+
+-- Can change enforceability and deferrability togher
+ALTER TABLE FKTABLE ALTER CONSTRAINT fktable_ftest1_ftest2_fkey ENFORCED NOT DEFERRABLE;
+SELECT condeferrable, condeferred, conenforced, convalidated
+FROM pg_constraint WHERE conname = 'fktable_ftest1_ftest2_fkey';
 
 DROP TABLE FKTABLE;
 DROP TABLE PKTABLE;
