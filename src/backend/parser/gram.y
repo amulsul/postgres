@@ -2657,11 +2657,10 @@ alter_table_cmd:
 			| ALTER CONSTRAINT name ConstraintAttributeSpec
 				{
 					AlterTableCmd *n = makeNode(AlterTableCmd);
-					Constraint *c = makeNode(Constraint);
+					AlterConstraintStmt *c = makeNode(AlterConstraintStmt);
 
 					n->subtype = AT_AlterConstraint;
 					n->def = (Node *) c;
-					c->contype = CONSTR_FOREIGN; /* others not supported, yet */
 					c->conname = $3;
 					processCASbits($4, @4, "ALTER CONSTRAINT statement",
 									&c->deferrable,

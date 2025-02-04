@@ -389,17 +389,17 @@ static void AlterIndexNamespaces(Relation classRel, Relation rel,
 static void AlterSeqNamespaces(Relation classRel, Relation rel,
 							   Oid oldNspOid, Oid newNspOid, ObjectAddresses *objsMoved,
 							   LOCKMODE lockmode);
-static ObjectAddress ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd,
+static ObjectAddress ATExecAlterConstraint(Relation rel, AlterConstraintStmt *cmdcon,
 										   bool recurse, bool recursing, LOCKMODE lockmode);
-static bool ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
-									 Relation rel, HeapTuple contuple, List **otherrelids,
-									 LOCKMODE lockmode);
+static bool ATExecAlterConstrRecurse(AlterConstraintStmt *cmdcon, Relation conrel,
+									 Relation tgrel, Relation rel, HeapTuple contuple,
+									 List **otherrelids, LOCKMODE lockmode);
 static void AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
 											bool deferrable, bool initdeferred,
 											List **otherrelids);
-static void ATExecAlterChildConstr(Constraint *cmdcon, Relation conrel, Relation tgrel,
-								   Relation rel, HeapTuple contuple, List **otherrelids,
-								   LOCKMODE lockmode);
+static void ATExecAlterChildConstr(AlterConstraintStmt *cmdcon, Relation conrel,
+								   Relation tgrel, Relation rel, HeapTuple contuple,
+								   List **otherrelids, LOCKMODE lockmode);
 static ObjectAddress ATExecValidateConstraint(List **wqueue,
 											  Relation rel, char *constrName,
 											  bool recurse, bool recursing, LOCKMODE lockmode);
@@ -5450,7 +5450,10 @@ ATExecCmd(List **wqueue, AlteredTableInfo *tab,
 											   lockmode);
 			break;
 		case AT_AlterConstraint:	/* ALTER CONSTRAINT */
-			address = ATExecAlterConstraint(rel, cmd, false, false, lockmode);
+			address =
+				ATExecAlterConstraint(rel,
+									  castNode(AlterConstraintStmt, cmd->def),
+									  false, false, lockmode);
 			break;
 		case AT_ValidateConstraint: /* VALIDATE CONSTRAINT */
 			address = ATExecValidateConstraint(wqueue, rel, cmd->name, cmd->recurse,
@@ -11801,10 +11804,9 @@ GetForeignKeyCheckTriggers(Relation trigrel,
  * InvalidObjectAddress.
  */
 static ObjectAddress
-ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd, bool recurse,
+ATExecAlterConstraint(Relation rel, AlterConstraintStmt *cmdcon, bool recurse,
 					  bool recursing, LOCKMODE lockmode)
 {
-	Constraint *cmdcon;
 	Relation	conrel;
 	Relation	tgrel;
 	SysScanDesc scan;
@@ -11814,8 +11816,6 @@ ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd, bool recurse,
 	ObjectAddress address;
 	List	   *otherrelids = NIL;
 	ListCell   *lc;
-
-	cmdcon = castNode(Constraint, cmd->def);
 
 	conrel = table_open(ConstraintRelationId, RowExclusiveLock);
 	tgrel = table_open(TriggerRelationId, RowExclusiveLock);
@@ -11939,9 +11939,9 @@ ATExecAlterConstraint(Relation rel, AlterTableCmd *cmd, bool recurse,
  * but existing releases don't do that.)
  */
 static bool
-ATExecAlterConstrRecurse(Constraint *cmdcon, Relation conrel, Relation tgrel,
-						 Relation rel, HeapTuple contuple, List **otherrelids,
-						 LOCKMODE lockmode)
+ATExecAlterConstrRecurse(AlterConstraintStmt *cmdcon, Relation conrel,
+						 Relation tgrel, Relation rel, HeapTuple contuple,
+						 List **otherrelids, LOCKMODE lockmode)
 {
 	Form_pg_constraint currcon;
 	Oid			conoid;
@@ -12079,9 +12079,9 @@ AlterConstrTriggerDeferrability(Oid conoid, Relation tgrel, Relation rel,
  * ATExecAlterConstrRecurse.
  */
 static void
-ATExecAlterChildConstr(Constraint *cmdcon, Relation conrel, Relation tgrel,
-					   Relation rel, HeapTuple contuple, List **otherrelids,
-					   LOCKMODE lockmode)
+ATExecAlterChildConstr(AlterConstraintStmt *cmdcon, Relation conrel,
+					   Relation tgrel, Relation rel, HeapTuple contuple,
+					   List **otherrelids, LOCKMODE lockmode)
 {
 	Form_pg_constraint currcon;
 	Oid			conoid;

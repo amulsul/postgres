@@ -2503,6 +2503,20 @@ typedef struct AlterCollationStmt
 	List	   *collname;
 } AlterCollationStmt;
 
+/* ----------------------
+ * Alter Constraint
+ * ----------------------
+ */
+typedef struct AlterConstraintStmt
+{
+	NodeTag		type;
+
+	char	   *conname;			/* Constraint name */
+
+	bool		deferrable;			/* DEFERRABLE? */
+	bool		initdeferred;		/* INITIALLY DEFERRED? */
+} AlterConstraintStmt;
+
 
 /* ----------------------
  *	Alter Domain
