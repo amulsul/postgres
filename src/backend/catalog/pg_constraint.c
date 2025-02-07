@@ -102,8 +102,6 @@ CreateConstraintEntry(const char *constraintName,
 
 	/* Only CHECK constraint can be not enforced */
 	Assert(isEnforced || constraintType == CONSTRAINT_CHECK);
-	/* NOT ENFORCED constraint must be NOT VALID */
-	Assert(isEnforced || !isValidated);
 
 	conDesc = table_open(ConstraintRelationId, RowExclusiveLock);
 

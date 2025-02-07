@@ -3157,10 +3157,7 @@ MergeCheckConstraint(List *constraints, const char *name, Node *expr, bool is_en
 			 * marked as ENFORCED because one of the parents is ENFORCED.
 			 */
 			if (!ccon->is_enforced && is_enforced)
-			{
 				ccon->is_enforced = true;
-				ccon->skip_validation = false;
-			}
 
 			return constraints;
 		}
@@ -3181,7 +3178,6 @@ MergeCheckConstraint(List *constraints, const char *name, Node *expr, bool is_en
 	newcon->expr = expr;
 	newcon->inhcount = 1;
 	newcon->is_enforced = is_enforced;
-	newcon->skip_validation = !is_enforced;
 	return lappend(constraints, newcon);
 }
 
@@ -17010,8 +17006,7 @@ MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
 			 * If the child constraint is "not valid" then cannot merge with a
 			 * valid parent constraint
 			 */
-			if (parent_con->convalidated && child_con->conenforced &&
-				!child_con->convalidated)
+			if (parent_con->convalidated && !child_con->convalidated)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 						 errmsg("constraint \"%s\" conflicts with NOT VALID constraint on child table \"%s\"",
@@ -19379,17 +19374,11 @@ ConstraintImpliedByRelConstraint(Relation scanrel, List *testConstraint, List *p
 		Node	   *cexpr;
 
 		/*
-		 * If this constraint hasn't been fully validated yet, we must ignore
-		 * it here.
+		 * If this constraint hasn't been fully validated yet or is not
+		 * enforced, we must ignore it here.
 		 */
-		if (!constr->check[i].ccvalid)
+		if (!constr->check[i].ccvalid || !constr->check[i].ccenforced)
 			continue;
-
-		/*
-		 * NOT ENFORCED constraints are always marked as invalid, which should
-		 * have been ignored.
-		 */
-		Assert(constr->check[i].ccenforced);
 
 		cexpr = stringToNode(constr->check[i].ccbin);
 
