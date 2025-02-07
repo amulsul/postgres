@@ -481,6 +481,17 @@ alter table p1 add constraint inh_check_constraint5 check (f1 < 10) not enforced
 alter table p1 add constraint inh_check_constraint6 check (f1 < 10) not enforced;
 alter table p1_c1 add constraint inh_check_constraint6 check (f1 < 10) enforced;
 
+-- however, cannot merge a not valid enforced child constraint with a valid
+-- not-enforced parent constraint.
+alter table p1_c1 add constraint inh_check_constraint9 check (f1 < 10) not valid enforced;
+alter table p1 add constraint inh_check_constraint9 check (f1 < 10) not enforced;
+-- but, allowed if the parent constraint is also invalid.
+alter table p1 add constraint inh_check_constraint9 check (f1 < 10) not valid not enforced;
+
+-- the invalid state of the child constraint will be ignored here.
+alter table p1 add constraint inh_check_constraint10 check (f1 < 10) not enforced;
+alter table p1_c1 add constraint inh_check_constraint10 check (f1 < 10) not valid enforced;
+
 create table p1_c2(f1 int constraint inh_check_constraint4 check (f1 < 10)) inherits(p1);
 
 -- but reverse is not allowed
@@ -498,7 +509,7 @@ create table p1_c3() inherits(p1, p1_c1);
 -- but not allowed if the child constraint is explicitly asked to be NOT ENFORCED
 create table p1_fail(f1 int constraint inh_check_constraint6 check (f1 < 10) not enforced) inherits(p1, p1_c1);
 
-select conrelid::regclass::text as relname, conname, conislocal, coninhcount, conenforced
+select conrelid::regclass::text as relname, conname, conislocal, coninhcount, conenforced, convalidated
 from pg_constraint where conname like 'inh\_check\_constraint%'
 order by 1, 2;
 
