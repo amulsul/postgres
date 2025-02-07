@@ -2740,7 +2740,7 @@ MergeWithExistingConstraint(Relation rel, const char *ccname, Node *expr,
 		 * If the child constraint is "not valid" then cannot merge with a
 		 * valid parent constraint.
 		 */
-		if (is_initially_valid && con->conenforced && !con->convalidated)
+		if (is_initially_valid && !con->convalidated)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 					 errmsg("constraint \"%s\" conflicts with NOT VALID constraint on relation \"%s\"",
@@ -2803,7 +2803,6 @@ MergeWithExistingConstraint(Relation rel, const char *ccname, Node *expr,
 		{
 			Assert(is_local);
 			con->conenforced = true;
-			con->convalidated = true;
 		}
 
 		CatalogTupleUpdate(conDesc, &tup->t_self, tup);

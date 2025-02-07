@@ -1453,7 +1453,6 @@ expandTableLikeClause(RangeVar *heapRel, TableLikeClause *table_like_clause)
 			char	   *ccname = constr->check[ccnum].ccname;
 			char	   *ccbin = constr->check[ccnum].ccbin;
 			bool		ccenforced = constr->check[ccnum].ccenforced;
-			bool		ccvalid = constr->check[ccnum].ccvalid;
 			bool		ccnoinherit = constr->check[ccnum].ccnoinherit;
 			Node	   *ccbin_node;
 			bool		found_whole_row;
@@ -1484,13 +1483,13 @@ expandTableLikeClause(RangeVar *heapRel, TableLikeClause *table_like_clause)
 			n->conname = pstrdup(ccname);
 			n->location = -1;
 			n->is_enforced = ccenforced;
-			n->initially_valid = ccvalid;
 			n->is_no_inherit = ccnoinherit;
 			n->raw_expr = NULL;
 			n->cooked_expr = nodeToString(ccbin_node);
 
 			/* We can skip validation, since the new table should be empty. */
 			n->skip_validation = true;
+			n->initially_valid = true;
 
 			atsubcmd = makeNode(AlterTableCmd);
 			atsubcmd->subtype = AT_AddConstraint;
@@ -2944,11 +2943,9 @@ transformCheckConstraints(CreateStmtContext *cxt, bool skipValidation)
 		return;
 
 	/*
-	 * When creating a new table (but not a foreign table), we can safely skip
-	 * the validation of check constraints and mark them as valid based on the
-	 * constraint enforcement flag, since NOT ENFORCED constraints must always
-	 * be marked as NOT VALID. (This will override any user-supplied NOT VALID
-	 * flag.)
+	 * If creating a new table (but not a foreign table), we can safely skip
+	 * validation of check constraints, and nonetheless mark them valid. (This
+	 * will override any user-supplied NOT VALID flag.)
 	 */
 	if (skipValidation)
 	{
@@ -2957,7 +2954,7 @@ transformCheckConstraints(CreateStmtContext *cxt, bool skipValidation)
 			Constraint *constraint = (Constraint *) lfirst(ckclist);
 
 			constraint->skip_validation = true;
-			constraint->initially_valid = constraint->is_enforced;
+			constraint->initially_valid = true;
 		}
 	}
 }

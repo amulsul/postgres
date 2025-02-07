@@ -19559,15 +19559,6 @@ processCASbits(int cas_bits, int location, const char *constrType,
 					 errmsg("%s constraints cannot be marked NOT ENFORCED",
 							constrType),
 					 parser_errposition(location)));
-
-		/*
-		 * NB: The validated status is irrelevant when the constraint is set to
-		 * NOT ENFORCED, but for consistency, it should be set accordingly.
-		 * This ensures that if the constraint is later changed to ENFORCED, it
-		 * will automatically be in the correct NOT VALIDATED state.
-		 */
-		if (not_valid)
-			*not_valid = true;
 	}
 
 	if (cas_bits & CAS_ENFORCED)
