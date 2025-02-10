@@ -1670,8 +1670,6 @@ ALTER TABLE fk_partitioned_fk ADD CONSTRAINT fk_partitioned_fk_a_b_fkey FOREIGN 
 	REFERENCES fk_notpartitioned_pk NOT ENFORCED;
 CREATE TABLE fk_partitioned_fk_2 (b int, fdrop1 int, fdrop2 int, a int);
 ALTER TABLE fk_partitioned_fk_2 DROP COLUMN fdrop1, DROP COLUMN fdrop2;
-ALTER TABLE fk_partitioned_fk_2 ADD CONSTRAINT fk_partitioned_fk_a_b_fkey FOREIGN KEY (a, b)
-	REFERENCES fk_notpartitioned_pk NOT ENFORCED;
 ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_2 FOR VALUES FROM (1000,1000) TO (2000,2000);
 ALTER TABLE fk_partitioned_fk ALTER CONSTRAINT fk_partitioned_fk_a_b_fkey ENFORCED;
 CREATE TABLE fk_partitioned_fk_3 (fdrop1 int, fdrop2 int, fdrop3 int, fdrop4 int, b int, a int)
@@ -1680,8 +1678,65 @@ ALTER TABLE fk_partitioned_fk_3 DROP COLUMN fdrop1, DROP COLUMN fdrop2,
 	DROP COLUMN fdrop3, DROP COLUMN fdrop4;
 CREATE TABLE fk_partitioned_fk_3_0 PARTITION OF fk_partitioned_fk_3 FOR VALUES WITH (MODULUS 5, REMAINDER 0);
 CREATE TABLE fk_partitioned_fk_3_1 PARTITION OF fk_partitioned_fk_3 FOR VALUES WITH (MODULUS 5, REMAINDER 1);
+-- Merge the not-enforced parent constraint with the enforced and not-enforced child constraints
+ALTER TABLE fk_partitioned_fk_3_0 ADD CONSTRAINT fk_partitioned_fk_3_0_a_b_fkey FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk ENFORCED;
+ALTER TABLE fk_partitioned_fk_3_1 ADD CONSTRAINT fk_partitioned_fk_3_1_a_b_fkey FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk NOT ENFORCED;
+ALTER TABLE fk_partitioned_fk_3 ADD CONSTRAINT fk_partitioned_fk_3_a_b_fkey FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk NOT ENFORCED;
+-- Merge the non-enforced parent constraint with both the enforced and
+-- non-enforced child constraints, where the referenced table is partitioned.
+CREATE TABLE fk_partitioned_pk (a int, b int, PRIMARY KEY (a, b)) PARTITION BY RANGE (a, b);
+CREATE TABLE fk_partitioned_pk_1 PARTITION OF fk_partitioned_pk FOR VALUES FROM (0,0) TO (1000,1000);
+-- Merge the enforced parent constraint with the enforced and not-enforced child constraints.
+ALTER TABLE fk_partitioned_fk_3_0 ADD CONSTRAINT fk_partitioned_fk_3_0_a_b_fkey1 FOREIGN KEY (a, b) REFERENCES fk_partitioned_pk ENFORCED;
+ALTER TABLE fk_partitioned_fk_3_1 ADD CONSTRAINT fk_partitioned_fk_3_1_a_b_fkey1 FOREIGN KEY (a, b) REFERENCES fk_partitioned_pk NOT ENFORCED;
+ALTER TABLE fk_partitioned_fk_3 ADD CONSTRAINT fk_partitioned_fk_3_a_b_fkey1 FOREIGN KEY (a, b) REFERENCES fk_partitioned_pk ENFORCED;
+SELECT conname, conenforced, convalidated, conrelid::regclass, confrelid::regclass
+FROM pg_constraint WHERE conrelid::regclass::text like 'fk_partitioned_fk_3%' ORDER BY oid;
+             conname             | conenforced | convalidated |       conrelid        |      confrelid       
+---------------------------------+-------------+--------------+-----------------------+----------------------
+ fk_partitioned_fk_3_0_a_b_fkey  | t           | t            | fk_partitioned_fk_3_0 | fk_notpartitioned_pk
+ fk_partitioned_fk_3_1_a_b_fkey  | f           | f            | fk_partitioned_fk_3_1 | fk_notpartitioned_pk
+ fk_partitioned_fk_3_a_b_fkey    | f           | f            | fk_partitioned_fk_3   | fk_notpartitioned_pk
+ fk_partitioned_fk_3_0_a_b_fkey1 | t           | t            | fk_partitioned_fk_3_0 | fk_partitioned_pk
+ fk_partitioned_fk_3_1_a_b_fkey1 | t           | t            | fk_partitioned_fk_3_1 | fk_partitioned_pk
+ fk_partitioned_fk_3_a_b_fkey1   | t           | t            | fk_partitioned_fk_3   | fk_partitioned_pk
+ fk_partitioned_fk_3_a_b_fkey2   | t           | t            | fk_partitioned_fk_3   | fk_partitioned_pk_1
+(7 rows)
+
+ALTER TABLE fk_partitioned_fk_3 DETACH PARTITION fk_partitioned_fk_3_0;
+ALTER TABLE fk_partitioned_fk_3 ATTACH PARTITION fk_partitioned_fk_3_0 FOR VALUES WITH (MODULUS 5, REMAINDER 0);
+SELECT conname, conenforced, convalidated, conrelid::regclass, confrelid::regclass
+FROM pg_constraint WHERE conrelid::regclass::text like 'fk_partitioned_fk_3%' ORDER BY oid;
+             conname             | conenforced | convalidated |       conrelid        |      confrelid       
+---------------------------------+-------------+--------------+-----------------------+----------------------
+ fk_partitioned_fk_3_0_a_b_fkey  | t           | t            | fk_partitioned_fk_3_0 | fk_notpartitioned_pk
+ fk_partitioned_fk_3_1_a_b_fkey  | f           | f            | fk_partitioned_fk_3_1 | fk_notpartitioned_pk
+ fk_partitioned_fk_3_a_b_fkey    | f           | f            | fk_partitioned_fk_3   | fk_notpartitioned_pk
+ fk_partitioned_fk_3_0_a_b_fkey1 | t           | t            | fk_partitioned_fk_3_0 | fk_partitioned_pk
+ fk_partitioned_fk_3_1_a_b_fkey1 | t           | t            | fk_partitioned_fk_3_1 | fk_partitioned_pk
+ fk_partitioned_fk_3_a_b_fkey1   | t           | t            | fk_partitioned_fk_3   | fk_partitioned_pk
+ fk_partitioned_fk_3_a_b_fkey2   | t           | t            | fk_partitioned_fk_3   | fk_partitioned_pk_1
+(7 rows)
+
+ALTER TABLE fk_partitioned_fk_3 ALTER CONSTRAINT fk_partitioned_fk_3_a_b_fkey1 NOT ENFORCED;
+-- Merging an enforced parent constraint (validated) with a not-enforced child
+-- constraint will implicitly change the child constraint to enforced and apply
+-- the validation as well.
 ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_3
   FOR VALUES FROM (2000,2000) TO (3000,3000);
+SELECT conname, conenforced, convalidated, conrelid::regclass, confrelid::regclass
+FROM pg_constraint WHERE conrelid::regclass::text like 'fk_partitioned_fk_3%' ORDER BY oid;
+             conname             | conenforced | convalidated |       conrelid        |      confrelid       
+---------------------------------+-------------+--------------+-----------------------+----------------------
+ fk_partitioned_fk_3_0_a_b_fkey  | t           | t            | fk_partitioned_fk_3_0 | fk_notpartitioned_pk
+ fk_partitioned_fk_3_1_a_b_fkey  | t           | t            | fk_partitioned_fk_3_1 | fk_notpartitioned_pk
+ fk_partitioned_fk_3_a_b_fkey    | t           | t            | fk_partitioned_fk_3   | fk_notpartitioned_pk
+ fk_partitioned_fk_3_0_a_b_fkey1 | f           | f            | fk_partitioned_fk_3_0 | fk_partitioned_pk
+ fk_partitioned_fk_3_1_a_b_fkey1 | f           | f            | fk_partitioned_fk_3_1 | fk_partitioned_pk
+ fk_partitioned_fk_3_a_b_fkey1   | f           | f            | fk_partitioned_fk_3   | fk_partitioned_pk
+ fk_partitioned_fk_3_a_b_fkey2   | f           | f            | fk_partitioned_fk_3   | fk_partitioned_pk_1
+(7 rows)
+
 -- Creating a foreign key with ONLY on a partitioned table referencing
 -- a non-partitioned table fails.
 ALTER TABLE ONLY fk_partitioned_fk ADD FOREIGN KEY (a, b)
@@ -1702,16 +1757,16 @@ INSERT INTO fk_partitioned_fk_2 (a,b) VALUES (1500, 1501);
 ERROR:  insert or update on table "fk_partitioned_fk_2" violates foreign key constraint "fk_partitioned_fk_a_b_fkey"
 DETAIL:  Key (a, b)=(1500, 1501) is not present in table "fk_notpartitioned_pk".
 INSERT INTO fk_partitioned_fk (a,b) VALUES (2500, 2502);
-ERROR:  insert or update on table "fk_partitioned_fk_3_1" violates foreign key constraint "fk_partitioned_fk_a_b_fkey"
+ERROR:  insert or update on table "fk_partitioned_fk_3_1" violates foreign key constraint "fk_partitioned_fk_3_1_a_b_fkey"
 DETAIL:  Key (a, b)=(2500, 2502) is not present in table "fk_notpartitioned_pk".
 INSERT INTO fk_partitioned_fk_3 (a,b) VALUES (2500, 2502);
-ERROR:  insert or update on table "fk_partitioned_fk_3_1" violates foreign key constraint "fk_partitioned_fk_a_b_fkey"
+ERROR:  insert or update on table "fk_partitioned_fk_3_1" violates foreign key constraint "fk_partitioned_fk_3_1_a_b_fkey"
 DETAIL:  Key (a, b)=(2500, 2502) is not present in table "fk_notpartitioned_pk".
 INSERT INTO fk_partitioned_fk (a,b) VALUES (2501, 2503);
-ERROR:  insert or update on table "fk_partitioned_fk_3_0" violates foreign key constraint "fk_partitioned_fk_a_b_fkey"
+ERROR:  insert or update on table "fk_partitioned_fk_3_0" violates foreign key constraint "fk_partitioned_fk_3_0_a_b_fkey"
 DETAIL:  Key (a, b)=(2501, 2503) is not present in table "fk_notpartitioned_pk".
 INSERT INTO fk_partitioned_fk_3 (a,b) VALUES (2501, 2503);
-ERROR:  insert or update on table "fk_partitioned_fk_3_0" violates foreign key constraint "fk_partitioned_fk_a_b_fkey"
+ERROR:  insert or update on table "fk_partitioned_fk_3_0" violates foreign key constraint "fk_partitioned_fk_3_0_a_b_fkey"
 DETAIL:  Key (a, b)=(2501, 2503) is not present in table "fk_notpartitioned_pk".
 -- but if we insert the values that make them valid, then they work
 INSERT INTO fk_notpartitioned_pk VALUES (500, 501), (1500, 1501),
@@ -1722,7 +1777,7 @@ INSERT INTO fk_partitioned_fk (a,b) VALUES (2500, 2502);
 INSERT INTO fk_partitioned_fk (a,b) VALUES (2501, 2503);
 -- this update fails because there is no referenced row
 UPDATE fk_partitioned_fk SET a = a + 1 WHERE a = 2501;
-ERROR:  insert or update on table "fk_partitioned_fk_3_1" violates foreign key constraint "fk_partitioned_fk_a_b_fkey"
+ERROR:  insert or update on table "fk_partitioned_fk_3_1" violates foreign key constraint "fk_partitioned_fk_3_1_a_b_fkey"
 DETAIL:  Key (a, b)=(2502, 2503) is not present in table "fk_notpartitioned_pk".
 -- but we can fix it thusly:
 INSERT INTO fk_notpartitioned_pk (a,b) VALUES (2502, 2503);
@@ -1865,8 +1920,6 @@ WHERE conrelid::regclass::text like 'fk_partitioned_fk%' ORDER BY oid::regclass:
 
 DROP TABLE fk_partitioned_fk, fk_notpartitioned_pk;
 -- NOT VALID foreign key on a non-partitioned table referencing a partitioned table
-CREATE TABLE fk_partitioned_pk (a int, b int, PRIMARY KEY (a, b)) PARTITION BY RANGE (a, b);
-CREATE TABLE fk_partitioned_pk_1 PARTITION OF fk_partitioned_pk FOR VALUES FROM (0,0) TO (1000,1000);
 CREATE TABLE fk_notpartitioned_fk (b int, a int);
 ALTER TABLE fk_notpartitioned_fk ADD FOREIGN KEY (a, b) REFERENCES fk_partitioned_pk NOT VALID;
 -- Constraint will be invalid.
@@ -2077,43 +2130,6 @@ Partition of: fk_partitioned_fk FOR VALUES IN (1500, 1502)
 Foreign-key constraints:
     TABLE "fk_partitioned_fk" CONSTRAINT "fk_partitioned_fk_a_b_fkey" FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk(a, b) ON UPDATE CASCADE ON DELETE CASCADE
 
-DROP TABLE fk_partitioned_fk_2;
-CREATE TABLE fk_partitioned_fk_2 (b int, a int,
-	CONSTRAINT fk_part_con FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk ON UPDATE CASCADE ON DELETE CASCADE NOT ENFORCED);
--- fail -- cannot merge constraints with different enforceability.
-ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_2 FOR VALUES IN (1500,1502);
-ERROR:  constraint "fk_partitioned_fk_a_b_fkey" enforceability conflicts with constraint "fk_part_con" on relation "fk_partitioned_fk_2"
--- If the constraint is modified to match the enforceability of the parent, it will work.
-BEGIN;
--- change child constraint
-ALTER TABLE fk_partitioned_fk_2 ALTER CONSTRAINT fk_part_con ENFORCED;
-ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_2 FOR VALUES IN (1500,1502);
-\d fk_partitioned_fk_2
-        Table "public.fk_partitioned_fk_2"
- Column |  Type   | Collation | Nullable | Default 
---------+---------+-----------+----------+---------
- b      | integer |           |          | 
- a      | integer |           |          | 
-Partition of: fk_partitioned_fk FOR VALUES IN (1500, 1502)
-Foreign-key constraints:
-    TABLE "fk_partitioned_fk" CONSTRAINT "fk_partitioned_fk_a_b_fkey" FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk(a, b) ON UPDATE CASCADE ON DELETE CASCADE
-
-ROLLBACK;
-BEGIN;
--- or change parent constraint
-ALTER TABLE fk_partitioned_fk ALTER CONSTRAINT fk_partitioned_fk_a_b_fkey NOT ENFORCED;
-ALTER TABLE fk_partitioned_fk ATTACH PARTITION fk_partitioned_fk_2 FOR VALUES IN (1500,1502);
-\d fk_partitioned_fk_2
-        Table "public.fk_partitioned_fk_2"
- Column |  Type   | Collation | Nullable | Default 
---------+---------+-----------+----------+---------
- b      | integer |           |          | 
- a      | integer |           |          | 
-Partition of: fk_partitioned_fk FOR VALUES IN (1500, 1502)
-Foreign-key constraints:
-    TABLE "fk_partitioned_fk" CONSTRAINT "fk_partitioned_fk_a_b_fkey" FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk(a, b) ON UPDATE CASCADE ON DELETE CASCADE NOT ENFORCED
-
-ROLLBACK;
 DROP TABLE fk_partitioned_fk_2;
 CREATE TABLE fk_partitioned_fk_4 (a int, b int, FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk(a, b) ON UPDATE CASCADE ON DELETE CASCADE) PARTITION BY RANGE (b, a);
 CREATE TABLE fk_partitioned_fk_4_1 PARTITION OF fk_partitioned_fk_4 FOR VALUES FROM (1,1) TO (100,100);
