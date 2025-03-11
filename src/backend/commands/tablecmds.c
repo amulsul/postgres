@@ -402,6 +402,8 @@ static void ATExecAlterChildConstr(List **wqueue, ATAlterConstraint *cmdcon,
 								   Relation conrel, Relation tgrel, Relation rel,
 								   HeapTuple contuple, bool recurse, List **otherrelids,
 								   LOCKMODE lockmode);
+static void UpdateConstraintEntry(ATAlterConstraint *cmdcon, Relation conrel,
+								  HeapTuple contuple);
 static ObjectAddress ATExecValidateConstraint(List **wqueue,
 											  Relation rel, char *constrName,
 											  bool recurse, bool recursing, LOCKMODE lockmode);
@@ -12095,22 +12097,8 @@ ATExecAlterConstraintInternal(List **wqueue, ATAlterConstraint *cmdcon,
 		(currcon->condeferrable != cmdcon->deferrable ||
 		 currcon->condeferred != cmdcon->initdeferred))
 	{
-		HeapTuple	copyTuple;
-		Form_pg_constraint copy_con;
-
-		copyTuple = heap_copytuple(contuple);
-		copy_con = (Form_pg_constraint) GETSTRUCT(copyTuple);
-		copy_con->condeferrable = cmdcon->deferrable;
-		copy_con->condeferred = cmdcon->initdeferred;
-		CatalogTupleUpdate(conrel, &copyTuple->t_self, copyTuple);
-
-		InvokeObjectPostAlterHook(ConstraintRelationId, currcon->oid, 0);
-
-		heap_freetuple(copyTuple);
+		UpdateConstraintEntry(cmdcon, conrel, contuple);
 		changed = true;
-
-		/* Make new constraint flags visible to others */
-		CacheInvalidateRelcache(rel);
 
 		/*
 		 * Now we need to update the multiple entries in pg_trigger that
@@ -12142,19 +12130,12 @@ ATExecAlterConstraintInternal(List **wqueue, ATAlterConstraint *cmdcon,
 		AttrNumber	colNum;
 		char	   *colName;
 		List	   *children;
-		HeapTuple	copyTuple;
-		Form_pg_constraint copy_con;
 
 		/* The current implementation only works for NOT NULL constraints */
 		Assert(currcon->contype == CONSTRAINT_NOTNULL);
 
-		copyTuple = heap_copytuple(contuple);
-		copy_con = (Form_pg_constraint) GETSTRUCT(copyTuple);
-		copy_con->connoinherit = cmdcon->noinherit;
-
-		CatalogTupleUpdate(conrel, &copyTuple->t_self, copyTuple);
+		UpdateConstraintEntry(cmdcon, conrel, contuple);
 		CommandCounterIncrement();
-		heap_freetuple(copyTuple);
 		changed = true;
 
 		/* Fetch the column number and name */
@@ -12314,6 +12295,41 @@ ATExecAlterChildConstr(List **wqueue, ATAlterConstraint *cmdcon,
 	}
 
 	systable_endscan(pscan);
+}
+
+/*
+ * Update the constraint entry.
+ */
+static void
+UpdateConstraintEntry(ATAlterConstraint *cmdcon, Relation conrel,
+					  HeapTuple contuple)
+{
+	Form_pg_constraint currcon;
+	HeapTuple	copyTuple;
+	Form_pg_constraint copy_con;
+
+	Assert(cmdcon->alterDeferrability || cmdcon->alterInheritability);
+
+	currcon = (Form_pg_constraint) GETSTRUCT(contuple);
+
+	copyTuple = heap_copytuple(contuple);
+	copy_con = (Form_pg_constraint) GETSTRUCT(copyTuple);
+
+	if (cmdcon->alterDeferrability)
+	{
+		copy_con->condeferrable = cmdcon->deferrable;
+		copy_con->condeferred = cmdcon->initdeferred;
+	}
+	if (cmdcon->alterInheritability)
+		copy_con->connoinherit = cmdcon->noinherit;
+
+	CatalogTupleUpdate(conrel, &copyTuple->t_self, copyTuple);
+	InvokeObjectPostAlterHook(ConstraintRelationId, currcon->oid, 0);
+
+	heap_freetuple(copyTuple);
+
+	/* Make new constraint flags visible to others */
+	CacheInvalidateRelcacheByRelid(currcon->conrelid);
 }
 
 /*
