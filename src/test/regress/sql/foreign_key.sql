@@ -1325,24 +1325,29 @@ UPDATE fk_notpartitioned_pk SET b = 2504 WHERE a = 2500;
 \d fk_notpartitioned_pk
 
 -- Check the exsting FK trigger
-CREATE TEMP TABLE tmp_trg_info AS SELECT tgtype, tgrelid::regclass, tgconstraint
-FROM pg_trigger
+SELECT conname, tgrelid::regclass as tgrel, regexp_replace(tgname, '[0-9]+', 'N') as tgname, tgtype
+FROM pg_trigger t JOIN pg_constraint c ON (t.tgconstraint = c.oid)
 WHERE tgrelid IN (SELECT relid FROM pg_partition_tree('fk_partitioned_fk'::regclass)
-					UNION ALL SELECT 'fk_notpartitioned_pk'::regclass);
-SELECT count(1) FROM tmp_trg_info;
+				  UNION ALL SELECT 'fk_notpartitioned_pk'::regclass)
+ORDER BY tgrelid, tgtype;
 
 ALTER TABLE fk_partitioned_fk ALTER CONSTRAINT fk_partitioned_fk_a_b_fkey NOT ENFORCED;
 -- No triggers
-SELECT count(1) FROM pg_trigger
+SELECT conname, tgrelid::regclass as tgrel, regexp_replace(tgname, '[0-9]+', 'N') as tgname, tgtype
+FROM pg_trigger t JOIN pg_constraint c ON (t.tgconstraint = c.oid)
 WHERE tgrelid IN (SELECT relid FROM pg_partition_tree('fk_partitioned_fk'::regclass)
-					UNION ALL SELECT 'fk_notpartitioned_pk'::regclass);
+				  UNION ALL SELECT 'fk_notpartitioned_pk'::regclass)
+ORDER BY tgrelid, tgtype;
 
 -- Changing it back to ENFORCED will recreate the necessary triggers.
 ALTER TABLE fk_partitioned_fk ALTER CONSTRAINT fk_partitioned_fk_a_b_fkey ENFORCED;
 
 -- Should be exactly the same number of triggers found as before
-SELECT COUNT(1) FROM pg_trigger pgt JOIN tmp_trg_info tt
-ON (pgt.tgtype = tt.tgtype AND pgt.tgrelid = tt.tgrelid AND pgt.tgconstraint = tt.tgconstraint);
+SELECT conname, tgrelid::regclass as tgrel, regexp_replace(tgname, '[0-9]+', 'N') as tgname, tgtype
+FROM pg_trigger t JOIN pg_constraint c ON (t.tgconstraint = c.oid)
+WHERE tgrelid IN (SELECT relid FROM pg_partition_tree('fk_partitioned_fk'::regclass)
+				  UNION ALL SELECT 'fk_notpartitioned_pk'::regclass)
+ORDER BY tgrelid, tgtype;
 
 ALTER TABLE fk_partitioned_fk DROP CONSTRAINT fk_partitioned_fk_a_b_fkey;
 -- done.

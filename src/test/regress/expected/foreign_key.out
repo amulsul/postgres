@@ -1805,35 +1805,65 @@ Referenced by:
     TABLE "fk_partitioned_fk" CONSTRAINT "fk_partitioned_fk_a_b_fkey" FOREIGN KEY (a, b) REFERENCES fk_notpartitioned_pk(a, b)
 
 -- Check the exsting FK trigger
-CREATE TEMP TABLE tmp_trg_info AS SELECT tgtype, tgrelid::regclass, tgconstraint
-FROM pg_trigger
+SELECT conname, tgrelid::regclass as tgrel, regexp_replace(tgname, '[0-9]+', 'N') as tgname, tgtype
+FROM pg_trigger t JOIN pg_constraint c ON (t.tgconstraint = c.oid)
 WHERE tgrelid IN (SELECT relid FROM pg_partition_tree('fk_partitioned_fk'::regclass)
-					UNION ALL SELECT 'fk_notpartitioned_pk'::regclass);
-SELECT count(1) FROM tmp_trg_info;
- count 
--------
-    14
-(1 row)
+				  UNION ALL SELECT 'fk_notpartitioned_pk'::regclass)
+ORDER BY tgrelid, tgtype;
+            conname             |         tgrel         |          tgname          | tgtype 
+--------------------------------+-----------------------+--------------------------+--------
+ fk_partitioned_fk_a_b_fkey     | fk_notpartitioned_pk  | RI_ConstraintTrigger_a_N |      9
+ fk_partitioned_fk_a_b_fkey     | fk_notpartitioned_pk  | RI_ConstraintTrigger_a_N |     17
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk     | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk     | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk_1   | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk_1   | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk_2   | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk_2   | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_3_a_b_fkey   | fk_partitioned_fk_3   | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_3_a_b_fkey   | fk_partitioned_fk_3   | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_3_0_a_b_fkey | fk_partitioned_fk_3_0 | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_3_0_a_b_fkey | fk_partitioned_fk_3_0 | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_3_1_a_b_fkey | fk_partitioned_fk_3_1 | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_3_1_a_b_fkey | fk_partitioned_fk_3_1 | RI_ConstraintTrigger_c_N |     17
+(14 rows)
 
 ALTER TABLE fk_partitioned_fk ALTER CONSTRAINT fk_partitioned_fk_a_b_fkey NOT ENFORCED;
 -- No triggers
-SELECT count(1) FROM pg_trigger
+SELECT conname, tgrelid::regclass as tgrel, regexp_replace(tgname, '[0-9]+', 'N') as tgname, tgtype
+FROM pg_trigger t JOIN pg_constraint c ON (t.tgconstraint = c.oid)
 WHERE tgrelid IN (SELECT relid FROM pg_partition_tree('fk_partitioned_fk'::regclass)
-					UNION ALL SELECT 'fk_notpartitioned_pk'::regclass);
- count 
--------
-     0
-(1 row)
+				  UNION ALL SELECT 'fk_notpartitioned_pk'::regclass)
+ORDER BY tgrelid, tgtype;
+ conname | tgrel | tgname | tgtype 
+---------+-------+--------+--------
+(0 rows)
 
 -- Changing it back to ENFORCED will recreate the necessary triggers.
 ALTER TABLE fk_partitioned_fk ALTER CONSTRAINT fk_partitioned_fk_a_b_fkey ENFORCED;
 -- Should be exactly the same number of triggers found as before
-SELECT COUNT(1) FROM pg_trigger pgt JOIN tmp_trg_info tt
-ON (pgt.tgtype = tt.tgtype AND pgt.tgrelid = tt.tgrelid AND pgt.tgconstraint = tt.tgconstraint);
- count 
--------
-    14
-(1 row)
+SELECT conname, tgrelid::regclass as tgrel, regexp_replace(tgname, '[0-9]+', 'N') as tgname, tgtype
+FROM pg_trigger t JOIN pg_constraint c ON (t.tgconstraint = c.oid)
+WHERE tgrelid IN (SELECT relid FROM pg_partition_tree('fk_partitioned_fk'::regclass)
+				  UNION ALL SELECT 'fk_notpartitioned_pk'::regclass)
+ORDER BY tgrelid, tgtype;
+            conname             |         tgrel         |          tgname          | tgtype 
+--------------------------------+-----------------------+--------------------------+--------
+ fk_partitioned_fk_a_b_fkey     | fk_notpartitioned_pk  | RI_ConstraintTrigger_a_N |      9
+ fk_partitioned_fk_a_b_fkey     | fk_notpartitioned_pk  | RI_ConstraintTrigger_a_N |     17
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk     | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk     | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk_1   | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk_1   | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk_2   | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_a_b_fkey     | fk_partitioned_fk_2   | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_3_a_b_fkey   | fk_partitioned_fk_3   | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_3_a_b_fkey   | fk_partitioned_fk_3   | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_3_0_a_b_fkey | fk_partitioned_fk_3_0 | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_3_0_a_b_fkey | fk_partitioned_fk_3_0 | RI_ConstraintTrigger_c_N |     17
+ fk_partitioned_fk_3_1_a_b_fkey | fk_partitioned_fk_3_1 | RI_ConstraintTrigger_c_N |      5
+ fk_partitioned_fk_3_1_a_b_fkey | fk_partitioned_fk_3_1 | RI_ConstraintTrigger_c_N |     17
+(14 rows)
 
 ALTER TABLE fk_partitioned_fk DROP CONSTRAINT fk_partitioned_fk_a_b_fkey;
 -- done.
