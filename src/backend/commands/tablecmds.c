@@ -430,8 +430,8 @@ static void AlterConstrUpdateConstraintEntry(ATAlterConstraint *cmdcon, Relation
 static ObjectAddress ATExecValidateConstraint(List **wqueue,
 											  Relation rel, char *constrName,
 											  bool recurse, bool recursing, LOCKMODE lockmode);
-static void QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
-										HeapTuple contuple, LOCKMODE lockmode);
+static void QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation fkrel,
+										Oid pkrelid, HeapTuple contuple, LOCKMODE lockmode);
 static void QueueCheckConstraintValidation(List **wqueue, Relation conrel, Relation rel,
 										   char *constrName, HeapTuple contuple,
 										   bool recurse, bool recursing, LOCKMODE lockmode);
@@ -11858,6 +11858,7 @@ AttachPartitionForeignKey(List **wqueue,
 	if (queueValidation)
 	{
 		Relation	conrel;
+		Oid			confrelid;
 
 		conrel = table_open(ConstraintRelationId, RowExclusiveLock);
 
@@ -11865,9 +11866,11 @@ AttachPartitionForeignKey(List **wqueue,
 		if (!HeapTupleIsValid(partcontup))
 			elog(ERROR, "cache lookup failed for constraint %u", partConstrOid);
 
+		confrelid = ((Form_pg_constraint) GETSTRUCT(partcontup))->confrelid;
+
 		/* Use the same lock as for AT_ValidateConstraint */
-		QueueFKConstraintValidation(wqueue, conrel, partition, partcontup,
-									ShareUpdateExclusiveLock);
+		QueueFKConstraintValidation(wqueue, conrel, partition, confrelid,
+									partcontup, ShareUpdateExclusiveLock);
 		ReleaseSysCache(partcontup);
 		table_close(conrel, RowExclusiveLock);
 	}
@@ -12924,7 +12927,8 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
 	{
 		if (con->contype == CONSTRAINT_FOREIGN)
 		{
-			QueueFKConstraintValidation(wqueue, conrel, rel, tuple, lockmode);
+			QueueFKConstraintValidation(wqueue, conrel, rel, con->confrelid,
+										tuple, lockmode);
 		}
 		else if (con->contype == CONSTRAINT_CHECK)
 		{
@@ -12957,8 +12961,8 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
  * for the specified relation and all its children.
  */
 static void
-QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
-							HeapTuple contuple, LOCKMODE lockmode)
+QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation fkrel,
+							Oid pkrelid, HeapTuple contuple, LOCKMODE lockmode)
 {
 	Form_pg_constraint con;
 	AlteredTableInfo *tab;
@@ -12969,7 +12973,21 @@ QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
 	Assert(con->contype == CONSTRAINT_FOREIGN);
 	Assert(!con->convalidated);
 
-	if (rel->rd_rel->relkind == RELKIND_RELATION)
+	/*
+	 * When the referenced table (pkrelid) is partitioned, the referencing
+	 * table (fkrel) may have multiple foreign key constraints for action
+	 * triggers—one for each referenced child partition. These action-trigger
+	 * constraints are intended to enforce the correct behavior when UPDATE or
+	 * DELETE operations are performed on the referenced partitions. See
+	 * createForeignKeyActionTriggers() for more details.
+	 *
+	 * However, these constraints should not be used for validating data in the
+	 * referencing table. Since referenced key values can be spread across
+	 * multiple partitions, validation must be performed through the root
+	 * referenced table (pkrelid) only.
+	 */
+	if (fkrel->rd_rel->relkind == RELKIND_RELATION &&
+		con->confrelid == pkrelid)
 	{
 		NewConstraint *newcon;
 		Constraint *fkconstraint;
@@ -12988,7 +13006,7 @@ QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
 		newcon->qual = (Node *) fkconstraint;
 
 		/* Find or create work queue entry for this table */
-		tab = ATGetQueueEntry(wqueue, rel);
+		tab = ATGetQueueEntry(wqueue, fkrel);
 		tab->constraints = lappend(tab->constraints, newcon);
 	}
 
@@ -12996,7 +13014,7 @@ QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
 	 * If the table at either end of the constraint is partitioned, we need to
 	 * recurse and handle every constraint that is a child of this constraint.
 	 */
-	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ||
+	if (fkrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE ||
 		get_rel_relkind(con->confrelid) == RELKIND_PARTITIONED_TABLE)
 	{
 		ScanKeyData pkey;
@@ -13028,8 +13046,12 @@ QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
 
 			childrel = table_open(childcon->conrelid, lockmode);
 
-			QueueFKConstraintValidation(wqueue, conrel, childrel, childtup,
-										lockmode);
+			/*
+			 * NB: Note that pkrelid should be passed as-is during recursion,
+			 * as it is required to identify the root referenced table.
+			 */
+			QueueFKConstraintValidation(wqueue, conrel, childrel, pkrelid,
+										childtup, lockmode);
 			table_close(childrel, NoLock);
 		}
 
