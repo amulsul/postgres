@@ -431,8 +431,7 @@ static ObjectAddress ATExecValidateConstraint(List **wqueue,
 											  Relation rel, char *constrName,
 											  bool recurse, bool recursing, LOCKMODE lockmode);
 static void QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
-										HeapTuple contuple, bool queueValidation,
-										LOCKMODE lockmode);
+										HeapTuple contuple, LOCKMODE lockmode);
 static void QueueCheckConstraintValidation(List **wqueue, Relation conrel, Relation rel,
 										   char *constrName, HeapTuple contuple,
 										   bool recurse, bool recursing, LOCKMODE lockmode);
@@ -11868,7 +11867,7 @@ AttachPartitionForeignKey(List **wqueue,
 
 		/* Use the same lock as for AT_ValidateConstraint */
 		QueueFKConstraintValidation(wqueue, conrel, partition, partcontup,
-									true, ShareUpdateExclusiveLock);
+									ShareUpdateExclusiveLock);
 		ReleaseSysCache(partcontup);
 		table_close(conrel, RowExclusiveLock);
 	}
@@ -12925,8 +12924,7 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
 	{
 		if (con->contype == CONSTRAINT_FOREIGN)
 		{
-			QueueFKConstraintValidation(wqueue, conrel, rel, tuple, true,
-										lockmode);
+			QueueFKConstraintValidation(wqueue, conrel, rel, tuple, lockmode);
 		}
 		else if (con->contype == CONSTRAINT_CHECK)
 		{
@@ -12960,8 +12958,7 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
  */
 static void
 QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
-							HeapTuple contuple, bool queueValidation,
-							LOCKMODE lockmode)
+							HeapTuple contuple, LOCKMODE lockmode)
 {
 	Form_pg_constraint con;
 	AlteredTableInfo *tab;
@@ -12972,13 +12969,7 @@ QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
 	Assert(con->contype == CONSTRAINT_FOREIGN);
 	Assert(!con->convalidated);
 
-	/*
-	 * Sometimes we only want to update the pg_constraint entry without
-	 * enqueueing it for validation; in such cases, queueValidation will be
-	 * false.
-	 */
-	if (queueValidation &&
-		rel->rd_rel->relkind == RELKIND_RELATION)
+	if (rel->rd_rel->relkind == RELKIND_RELATION)
 	{
 		NewConstraint *newcon;
 		Constraint *fkconstraint;
@@ -13024,7 +13015,6 @@ QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
 		{
 			Form_pg_constraint childcon;
 			Relation	childrel;
-			bool		childValidation = true;
 
 			childcon = (Form_pg_constraint) GETSTRUCT(childtup);
 
@@ -13036,33 +13026,11 @@ QueueFKConstraintValidation(List **wqueue, Relation conrel, Relation rel,
 			if (childcon->convalidated)
 				continue;
 
-			/*
-			 * When the referenced table is partitioned, the referencing table may have
-			 * multiple foreign key constraints for action triggers -- one for each child
-			 * partition. These are action-trigger constraints intended to enforce the
-			 * appropriate behavior when UPDATE or DELETE operations are performed on the
-			 * referenced partitions. See createForeignKeyActionTriggers() for more details.
-			 *
-			 * These constraints should not be used for validating data in the referencing
-			 * table. This is because referenced key values may be distributed across
-			 * multiple partitions, and therefore, validation should be performed only
-			 * through the root referenced table.
-			 */
-			if (childcon->conrelid == RelationGetRelid(rel))
-			{
-				/* No need to open it again */
-				childrel = rel;
-				childValidation = false;
-			}
-			else
-				childrel = table_open(childcon->conrelid, lockmode);
+			childrel = table_open(childcon->conrelid, lockmode);
 
 			QueueFKConstraintValidation(wqueue, conrel, childrel, childtup,
-										childValidation, lockmode);
-
-			/* We have skip opening the table if it is the same input rel */
-			if (childcon->conrelid != RelationGetRelid(rel))
-				table_close(childrel, NoLock);
+										lockmode);
+			table_close(childrel, NoLock);
 		}
 
 		systable_endscan(pscan);
