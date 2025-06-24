@@ -29,6 +29,7 @@
 #include "common/logging.h"
 #include "common/relpath.h"
 #include "getopt_long.h"
+#include "pg_waldump.h"
 #include "rmgrdesc.h"
 #include "storage/bufpage.h"
 
@@ -37,20 +38,13 @@
  * give a thought about doing the same in pg_walinspect contrib module as well.
  */
 
+int			WalSegSz;
+
 static const char *progname;
 
-static int	WalSegSz;
 static volatile sig_atomic_t time_to_stop = false;
 
 static const RelFileLocator emptyRelFileLocator = {0, 0, 0};
-
-typedef struct XLogDumpPrivate
-{
-	TimeLineID	timeline;
-	XLogRecPtr	startptr;
-	XLogRecPtr	endptr;
-	bool		endptr_reached;
-} XLogDumpPrivate;
 
 typedef struct XLogDumpConfig
 {
