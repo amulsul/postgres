@@ -326,6 +326,29 @@ identify_target_directory(char *directory, char *fname)
 	return NULL;				/* not reached */
 }
 
+/* Returns the size in bytes of the data to be read. */
+static inline int
+required_read_len(XLogDumpPrivate *private, XLogRecPtr targetPagePtr,
+				  int reqLen)
+{
+	int			count = XLOG_BLCKSZ;
+
+	if (private->endptr != InvalidXLogRecPtr)
+	{
+		if (targetPagePtr + XLOG_BLCKSZ <= private->endptr)
+			count = XLOG_BLCKSZ;
+		else if (targetPagePtr + reqLen <= private->endptr)
+			count = private->endptr - targetPagePtr;
+		else
+		{
+			private->endptr_reached = true;
+			return -1;
+		}
+	}
+
+	return count;
+}
+
 /* pg_waldump's XLogReaderRoutine->segment_open callback */
 static void
 WALDumpOpenSegment(XLogReaderState *state, XLogSegNo nextSegNo,
@@ -383,21 +406,11 @@ WALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 				XLogRecPtr targetPtr, char *readBuff)
 {
 	XLogDumpPrivate *private = state->private_data;
-	int			count = XLOG_BLCKSZ;
+	int			count = required_read_len(private, targetPagePtr, reqLen);
 	WALReadError errinfo;
 
-	if (private->endptr != InvalidXLogRecPtr)
-	{
-		if (targetPagePtr + XLOG_BLCKSZ <= private->endptr)
-			count = XLOG_BLCKSZ;
-		else if (targetPagePtr + reqLen <= private->endptr)
-			count = private->endptr - targetPagePtr;
-		else
-		{
-			private->endptr_reached = true;
-			return -1;
-		}
-	}
+	if (private->endptr_reached)
+		return -1;
 
 	if (!WALRead(state, readBuff, targetPagePtr, count, private->timeline,
 				 &errinfo))
