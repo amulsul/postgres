@@ -285,10 +285,6 @@ main(int argc, char **argv)
 		manifest_path = psprintf("%s/backup_manifest",
 								 context.backup_directory);
 
-	/* By default, look for the WAL in the backup directory, too. */
-	if (wal_directory == NULL)
-		wal_directory = psprintf("%s/pg_wal", context.backup_directory);
-
 	/*
 	 * Try to read the manifest. We treat any errors encountered while parsing
 	 * the manifest as fatal; there doesn't seem to be much point in trying to
@@ -367,6 +363,10 @@ main(int argc, char **argv)
 	 */
 	if (context.format == 'p' && !context.skip_checksums)
 		verify_backup_checksums(&context);
+
+	/* By default, look for the WAL in the backup directory, too. */
+	if (wal_directory == NULL)
+		wal_directory = psprintf("%s/pg_wal", context.backup_directory);
 
 	/*
 	 * Try to parse the required ranges of WAL records, unless we were told
