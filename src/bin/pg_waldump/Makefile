@@ -12,11 +12,13 @@ OBJS = \
 	$(WIN32RES) \
 	compat.o \
 	pg_waldump.o \
+	astreamer_waldump.o \
 	rmgrdesc.o \
 	xlogreader.o \
 	xlogstats.o
 
-override CPPFLAGS := -DFRONTEND $(CPPFLAGS)
+override CPPFLAGS := -DFRONTEND -I$(libpq_srcdir) $(CPPFLAGS)
+LDFLAGS_INTERNAL += -L$(top_builddir)/src/fe_utils -lpgfeutils
 
 RMGRDESCSOURCES = $(sort $(notdir $(wildcard $(top_srcdir)/src/backend/access/rmgrdesc/*desc*.c)))
 RMGRDESCOBJS = $(patsubst %.c,%.o,$(RMGRDESCSOURCES))
