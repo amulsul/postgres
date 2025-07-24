@@ -501,8 +501,8 @@ msgstr "  -s, --skip-checksums        체크섬 검사 건너뜀\n"
 
 #: pg_verifybackup.c:992
 #, c-format
-msgid "  -w, --wal-directory=PATH    use specified path for WAL files\n"
-msgstr "  -w, --wal-directory=경로    WAL 파일이 있는 경로 지정\n"
+msgid "  -w, --wal-path=PATH    use specified path for WAL files\n"
+msgstr "  -w, --wal-path=경로    WAL 파일이 있는 경로 지정\n"
 
 #: pg_verifybackup.c:993
 #, c-format
