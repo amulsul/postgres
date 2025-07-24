@@ -472,8 +472,8 @@ msgstr "  -s, --skip-checksums         salta la verifica del checksum\n"
 
 #: pg_verifybackup.c:911
 #, c-format
-msgid "  -w, --wal-directory=PATH    use specified path for WAL files\n"
-msgstr "  -w, --wal-directory=PATH     usa il percorso specificato per i file WAL\n"
+msgid "  -w, --wal-path=PATH    use specified path for WAL files\n"
+msgstr "  -w, --wal-path=PATH     usa il percorso specificato per i file WAL\n"
 
 #: pg_verifybackup.c:912
 #, c-format
