@@ -555,8 +555,8 @@ msgstr "  -s, --skip-checksums        跳過檢查碼驗證\n"
 
 #: pg_verifybackup.c:992
 #, c-format
-msgid "  -w, --wal-directory=PATH    use specified path for WAL files\n"
-msgstr "  -w, --wal-directory=PATH    用指定的路徑存放 WAL 檔\n"
+msgid "  -w, --wal-path=PATH    use specified path for WAL files\n"
+msgstr "  -w, --wal-path=PATH    用指定的路徑存放 WAL 檔\n"
 
 #: pg_verifybackup.c:993
 #, c-format
