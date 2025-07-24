@@ -498,8 +498,8 @@ msgstr "  -s, --skip-checksums        ignore la vérification des sommes de cont
 
 #: pg_verifybackup.c:992
 #, c-format
-msgid "  -w, --wal-directory=PATH    use specified path for WAL files\n"
-msgstr "  -w, --wal-directory=CHEMIN  utilise le chemin spécifié pour les fichiers WAL\n"
+msgid "  -w, --wal-path=PATH    use specified path for WAL files\n"
+msgstr "  -w, --wal-path=CHEMIN  utilise le chemin spécifié pour les fichiers WAL\n"
 
 #: pg_verifybackup.c:993
 #, c-format

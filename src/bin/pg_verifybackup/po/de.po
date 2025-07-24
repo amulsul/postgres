@@ -785,8 +785,8 @@ msgstr "  -s, --skip-checksums        Überprüfung der Prüfsummen überspringe
 
 #: pg_verifybackup.c:1379
 #, c-format
-msgid "  -w, --wal-directory=PATH    use specified path for WAL files\n"
-msgstr "  -w, --wal-directory=PFAD    angegebenen Pfad für WAL-Dateien verwenden\n"
+msgid "  -w, --wal-path=PATH    use specified path for WAL files\n"
+msgstr "  -w, --wal-path=PFAD    angegebenen Pfad für WAL-Dateien verwenden\n"
 
 #: pg_verifybackup.c:1380
 #, c-format
