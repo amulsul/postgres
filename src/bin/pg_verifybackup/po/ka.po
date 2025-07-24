@@ -784,8 +784,8 @@ msgstr "  -s, --skip-checksums        საკონტროლო ჯამ�
 
 #: pg_verifybackup.c:1379
 #, c-format
-msgid "  -w, --wal-directory=PATH    use specified path for WAL files\n"
-msgstr "  -w, --wal-directory=ბილიკი    WAL ფაილებისთვის მითითებული ბილიკის გამოყენება\n"
+msgid "  -w, --wal-path=PATH    use specified path for WAL files\n"
+msgstr "  -w, --wal-path=ბილიკი    WAL ფაილებისთვის მითითებული ბილიკის გამოყენება\n"
 
 #: pg_verifybackup.c:1380
 #, c-format
