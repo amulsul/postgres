@@ -114,11 +114,11 @@ verify_directory(const char *directory)
 }
 
 /*
- * Create if necessary the directory storing the full-page images extracted
- * from the WAL records read.
+ * Create the directory if it doesn't exist. Report an error if creation fails
+ * or if an existing directory is not empty.
  */
 static void
-create_fullpage_directory(char *path)
+create_directory(char *path)
 {
 	int			ret;
 
@@ -1112,8 +1112,12 @@ main(int argc, char **argv)
 		}
 	}
 
+	/*
+	 * Create if necessary the directory storing the full-page images
+	 * extracted from the WAL records read.
+	 */
 	if (config.save_fullpage_path != NULL)
-		create_fullpage_directory(config.save_fullpage_path);
+		create_directory(config.save_fullpage_path);
 
 	/* parse files as start/end boundaries, extract path if not specified */
 	if (optind < argc)
