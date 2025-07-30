@@ -7,6 +7,8 @@ use Cwd;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use File::Path qw(rmtree);
+use List::Util qw(shuffle);
 
 my $tar = $ENV{TAR};
 
@@ -258,6 +260,29 @@ sub test_pg_waldump
 	return @lines;
 }
 
+# Create a tar archive, shuffling the file order
+sub generate_archive
+{
+	my ($archive, $directory, $compression_flags) = @_;
+
+	my @files;
+	opendir my $dh, $directory or die "opendir: $!";
+	while (my $entry = readdir $dh) {
+		# Skip '.' and '..'
+		next if $entry eq '.' || $entry eq '..';
+		push @files, $entry;
+	}
+	closedir $dh;
+
+	@files = shuffle @files;
+
+	# move into the WAL directory before archiving files
+	my $cwd = getcwd;
+	chdir($directory) || die "chdir: $!";
+	command_ok([$tar, $compression_flags, $archive, @files]);
+	chdir($cwd) || die "chdir: $!";
+}
+
 my $tmp_dir = PostgreSQL::Test::Utils::tempdir_short();
 
 my @scenario = (
@@ -295,12 +320,9 @@ for my $scenario (@scenario)
 		  # create pg_wal archive
 		  if ($scenario->{'is_archive'})
 		  {
-			  # move into the WAL directory before archiving files
-			  my $cwd = getcwd;
-			  chdir($node->data_dir . '/pg_wal/') || die "chdir: $!";
-			  command_ok(
-				  [ $tar, $scenario->{'compression_flags'}, $path , '.' ]);
-			  chdir($cwd) || die "chdir: $!";
+			  generate_archive($path,
+				  $node->data_dir . '/pg_wal',
+				  $scenario->{'compression_flags'});
 		  }
 
 		command_fails_like(
