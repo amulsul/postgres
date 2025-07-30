@@ -3,6 +3,9 @@
 PGFILEDESC = "pg_waldump - decode and display WAL"
 PGAPPICON=win32
 
+# make these available to TAP test scripts
+export TAR
+
 subdir = src/bin/pg_waldump
 top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
