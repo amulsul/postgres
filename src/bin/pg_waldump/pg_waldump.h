@@ -12,6 +12,7 @@
 #define PG_WALDUMP_H
 
 #include "access/xlogdefs.h"
+#include "fe_utils/astreamer.h"
 
 extern int WalSegSz;
 

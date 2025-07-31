@@ -20,7 +20,6 @@
 #include "access/xlogdefs.h"
 #include "common/file_perm.h"
 #include "common/logging.h"
-#include "fe_utils/astreamer.h"
 #include "fe_utils/simple_list.h"
 #include "pg_waldump.h"
 

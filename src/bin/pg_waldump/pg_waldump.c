@@ -28,7 +28,6 @@
 #include "common/file_utils.h"
 #include "common/logging.h"
 #include "common/relpath.h"
-#include "fe_utils/astreamer.h"
 #include "getopt_long.h"
 #include "pg_waldump.h"
 #include "rmgrdesc.h"
