@@ -1095,7 +1095,7 @@ main(int argc, char **argv)
 	char	   *waldir = NULL;
 	char	   *walpath = NULL;
 	char	   *errormsg;
-	bool		is_tar;
+	bool		is_tar = false;
 	XLogReaderRoutine *routine = NULL;
 	pg_compress_algorithm compression;
 
