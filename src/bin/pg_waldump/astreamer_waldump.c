@@ -32,6 +32,7 @@ typedef struct astreamer_waldump
 {
 	/* These fields don't change once initialized. */
 	astreamer	base;
+	TimeLineID  timeline;
 	XLogSegNo	startSegNo;
 	XLogSegNo	endSegNo;
 	XLogDumpPrivate *privateInfo;
@@ -53,6 +54,7 @@ static void astreamer_waldump_finalize(astreamer *streamer);
 static void astreamer_waldump_free(astreamer *streamer);
 
 static bool member_is_relevant_wal(astreamer_member *member,
+								   TimeLineID startTimeLineID,
 								   XLogSegNo startSegNo,
 								   XLogSegNo endSegNo,
 								   XLogSegNo nextSegNo,
@@ -229,7 +231,9 @@ astreamer_waldump_content(astreamer *streamer, astreamer_member *member,
 				mystreamer->skipThisSeg = false;
 				mystreamer->writeThisSeg = false;
 
-				if (!member_is_relevant_wal(member, mystreamer->startSegNo,
+				if (!member_is_relevant_wal(member,
+											mystreamer->timeline,
+											mystreamer->startSegNo,
 											mystreamer->endSegNo,
 											mystreamer->nextSegNo,
 											&fname, &segNo, &timeline))
@@ -387,8 +391,9 @@ astreamer_waldump_free(astreamer *streamer)
  * otherwise, returns false.
  */
 static bool
-member_is_relevant_wal(astreamer_member *member, XLogSegNo startSegNo,
-					   XLogSegNo endSegNo, XLogSegNo nextSegNo, char **curFname,
+member_is_relevant_wal(astreamer_member *member, TimeLineID startTimeLineID,
+					   XLogSegNo startSegNo, XLogSegNo endSegNo,
+					   XLogSegNo nextSegNo, char **curFname,
 					   XLogSegNo *curSegNo, TimeLineID *curSegTimeline)
 {
 	int			pathlen;
@@ -411,6 +416,10 @@ member_is_relevant_wal(astreamer_member *member, XLogSegNo startSegNo,
 
 	/* Parse position from file */
 	XLogFromFileName(fname, &timeline, &segNo, WalSegSz);
+
+	/* Ignore the older timeline */
+	if (startTimeLineID > timeline)
+		return false;
 
 	/* Skip if the current segment is not the desired one */
 	if (startSegNo > segNo || endSegNo < segNo)
