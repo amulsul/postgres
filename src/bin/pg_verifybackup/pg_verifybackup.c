@@ -1240,8 +1240,8 @@ parse_required_wal(verifier_context *context, char *pg_waldump_path,
 		fflush(NULL);
 		if (system(pg_waldump_cmd) != 0)
 			report_backup_error(context,
-								"WAL parsing failed for timeline %u",
-								this_wal_range->tli);
+								"WAL parsing failed for timeline %u : command %s",
+								this_wal_range->tli, pg_waldump_cmd);
 
 		this_wal_range = this_wal_range->next;
 	}
