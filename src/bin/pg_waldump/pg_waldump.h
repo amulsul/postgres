@@ -35,7 +35,6 @@ typedef struct XLogDumpPrivate
 	char	   *tmpdir;
 } XLogDumpPrivate;
 
-#endif							/* end of PG_WALDUMP_H */
 
 extern astreamer *astreamer_waldump_content_new(astreamer *next,
 												XLogRecPtr startptr,
@@ -43,3 +42,5 @@ extern astreamer *astreamer_waldump_content_new(astreamer *next,
 												XLogDumpPrivate *private);
 extern int	astreamer_wal_read(char *readBuff, XLogRecPtr startptr, Size count,
 							   XLogDumpPrivate *private);
+
+#endif							/* end of PG_WALDUMP_H */
