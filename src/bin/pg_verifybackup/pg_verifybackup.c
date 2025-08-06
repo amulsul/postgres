@@ -1229,6 +1229,7 @@ parse_required_wal(verifier_context *context, char *pg_waldump_path,
 	manifest_data *manifest = context->manifest;
 	manifest_wal_range *this_wal_range = manifest->first_wal_range;
 
+	context->exit_on_error = false;
 	while (this_wal_range != NULL)
 	{
 		char	   *pg_waldump_cmd;
@@ -1239,9 +1240,44 @@ parse_required_wal(verifier_context *context, char *pg_waldump_path,
 								  LSN_FORMAT_ARGS(this_wal_range->end_lsn));
 		fflush(NULL);
 		if (system(pg_waldump_cmd) != 0)
+		{
 			report_backup_error(context,
 								"WAL parsing failed for timeline %u : command %s",
 								this_wal_range->tli, pg_waldump_cmd);
+
+			pg_waldump_cmd = psprintf("\"%s\" --path=\"%s\" --timeline=%u --start=%X/%08X --end=%X/%08X\n",
+									  pg_waldump_path, wal_path, this_wal_range->tli,
+									  LSN_FORMAT_ARGS(this_wal_range->start_lsn),
+									  LSN_FORMAT_ARGS(this_wal_range->end_lsn));
+			if (system(pg_waldump_cmd) != 0)
+				report_backup_error(context,
+									"DEBUG1: command %s", pg_waldump_cmd);
+			else
+				report_backup_error(context,
+									"DEBUG1: Success command %s", pg_waldump_cmd);
+
+			pg_waldump_cmd = psprintf("\"%s\" --path=\"%s\" --start=%X/%08X --end=%X/%08X\n",
+									  pg_waldump_path, wal_path,
+									  LSN_FORMAT_ARGS(this_wal_range->start_lsn),
+									  LSN_FORMAT_ARGS(this_wal_range->end_lsn));
+			if (system(pg_waldump_cmd) != 0)
+				report_backup_error(context,
+									"DEBUG2: command %s", pg_waldump_cmd);
+			else
+				report_backup_error(context,
+									"DEBUG2: Success command %s", pg_waldump_cmd);
+
+			pg_waldump_cmd = psprintf("\"%s\" --start=%X/%08X --end=%X/%08X %s\n",
+									  pg_waldump_path,
+									  LSN_FORMAT_ARGS(this_wal_range->start_lsn),
+									  LSN_FORMAT_ARGS(this_wal_range->end_lsn), wal_path);
+			if (system(pg_waldump_cmd) != 0)
+				report_backup_error(context,
+									"DEBUG3: command %s", pg_waldump_cmd);
+			else
+				report_backup_error(context,
+									"DEBUG3: Success command %s", pg_waldump_cmd);
+		}
 
 		this_wal_range = this_wal_range->next;
 	}
