@@ -281,6 +281,9 @@ sub generate_archive
 	chdir($directory) || die "chdir: $!";
 	command_ok([$tar, $compression_flags, $archive, @files]);
 	chdir($cwd) || die "chdir: $!";
+
+	# give necessary permission
+	chmod(0755, $archive) || die "chmod $archive: $!";
 }
 
 my $tmp_dir = PostgreSQL::Test::Utils::tempdir_short();
@@ -316,6 +319,9 @@ for my $scenario (@scenario)
 		  if !defined $tar;
 		skip "$scenario->{'compression_method'} compression not supported by this build", 3
 		  if !$scenario->{'enabled'} && $scenario->{'is_archive'};
+		skip "unix-style permissions not supported on Windows", 3
+		  if ($scenario->{'is_archive'}
+			&& ($windows_os || $Config::Config{osname} eq 'cygwin'));
 
 		  # create pg_wal archive
 		  if ($scenario->{'is_archive'})
