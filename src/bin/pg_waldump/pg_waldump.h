@@ -33,6 +33,7 @@ typedef struct XLogDumpPrivate
 	StringInfo	archive_streamer_buf;	/* Buffer for receiving WAL data */
 	XLogRecPtr	archive_streamer_read_ptr; /* Populate the buffer with records
 											  until this record pointer */
+	char	   *tmpdir;
 } XLogDumpPrivate;
 
 

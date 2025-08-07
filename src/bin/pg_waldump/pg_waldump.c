@@ -326,6 +326,51 @@ identify_target_directory(char *directory, char *fname)
 }
 
 /*
+ * Set up a temporary directory to temporarily store WAL segments.
+ */
+static char *
+setup_tmp_dir(char *waldir)
+{
+	char	   *tmpdir = waldir != NULL ? pstrdup(waldir) :  pstrdup(".");
+
+	canonicalize_path(tmpdir);
+	tmpdir = psprintf("%s/pg_waldump_tmp_dir",
+					  getenv("TMPDIR") ? getenv("TMPDIR") : tmpdir);
+
+	create_directory(tmpdir);
+
+	return tmpdir;
+}
+
+/*
+ * Removes a directory along with its contents, if any.
+ */
+static void
+remove_tmp_dir(char *tmpdir)
+{
+	DIR		   *dir;
+	struct dirent *de;
+
+	dir = opendir(tmpdir);
+	while ((de = readdir(dir)) != NULL)
+	{
+		char		path[MAXPGPATH];
+
+		if (strcmp(de->d_name, ".") == 0 ||
+			strcmp(de->d_name, "..") == 0)
+			continue;
+
+		snprintf(path, MAXPGPATH, "%s/%s", tmpdir, de->d_name);
+		unlink(path);
+	}
+	closedir(dir);
+
+	if (rmdir(tmpdir) < 0)
+		pg_log_error("could not remove directory \"%s\": %m",
+					 tmpdir);
+}
+
+/*
  * Returns true if the given file is a tar archive and outputs its compression
  * algorithm.
  */
@@ -559,7 +604,7 @@ WALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 				XLogRecPtr targetPtr, char *readBuff)
 {
 	XLogDumpPrivate *private = state->private_data;
-	int			count = required_read_len(private, targetPtr, reqLen);
+	int			count = required_read_len(private, targetPagePtr, reqLen);
 	WALReadError errinfo;
 
 	if (private->endptr_reached)
@@ -618,12 +663,53 @@ TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 				   XLogRecPtr targetPtr, char *readBuff)
 {
 	XLogDumpPrivate *private = state->private_data;
-	int			count = required_read_len(private, targetPtr, reqLen);
+	int			count = required_read_len(private, targetPagePtr, reqLen);
+	XLogSegNo	nextSegNo;
 
 	if (private->endptr_reached)
 		return -1;
 
-	/* Read the WAL page from the archive streamer */
+	/*
+	 * If the target page is in a different segment, first check for the WAL
+	 * segment's physical existence in the temporary directory.
+	 *
+	 * XXX: Timeline change is not handled.
+	 */
+	nextSegNo = state->seg.ws_segno;
+	if (!XLByteInSeg(targetPagePtr, nextSegNo, WalSegSz))
+	{
+		char		fname[MAXPGPATH];
+
+		if (state->seg.ws_file >= 0)
+		{
+			char		fpath[MAXPGPATH];
+
+			close(state->seg.ws_file);
+			state->seg.ws_file = -1;
+
+			/* Remove this file, as it is no longer needed. */
+			XLogFileName(fname, state->seg.ws_tli, nextSegNo, WalSegSz);
+			snprintf(fpath, MAXPGPATH, "%s/%s", private->tmpdir, fname);
+			unlink(fpath);
+		}
+
+		XLByteToSeg(targetPagePtr, nextSegNo, WalSegSz);
+		state->seg.ws_tli = private->timeline;
+		state->seg.ws_segno = nextSegNo;
+
+		/*
+		 * If the next segment exists, open it and continue reading from there
+		 */
+		XLogFileName(fname, private->timeline, nextSegNo, WalSegSz);
+		state->seg.ws_file = open_file_in_directory(private->tmpdir, fname);
+	}
+
+	/* Continue reading from the open WAL segment, if any */
+	if (state->seg.ws_file >= 0)
+		return WALDumpReadPage(state, targetPagePtr, reqLen, targetPtr,
+							   readBuff);
+
+	/* Otherwise, read the WAL page from the archive streamer */
 	return astreamer_wal_read(readBuff, targetPagePtr, count, private);
 }
 
@@ -1435,6 +1521,9 @@ main(int argc, char **argv)
 		/* Set up for reading tar file */
 		init_tar_archive_reader(&private, waldir, compression);
 
+		/* Create temporary space for writing WAL segments. */
+		private.tmpdir = setup_tmp_dir(waldir);
+
 		/* Routine to decode WAL files in tar archive */
 		routine = XL_ROUTINE(.page_read = TarWALDumpReadPage,
 							 .segment_open = TarWALDumpOpenSegment,
@@ -1548,6 +1637,10 @@ main(int argc, char **argv)
 
 	if (config.stats == true && !config.quiet)
 		XLogDumpDisplayStats(&config, &stats);
+
+	/* Remove temporary directory if any */
+	if (private.tmpdir != NULL)
+		remove_tmp_dir(private.tmpdir);
 
 	if (time_to_stop)
 		exit(0);
