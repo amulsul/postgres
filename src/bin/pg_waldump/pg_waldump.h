@@ -13,7 +13,10 @@
 
 #include "access/xlogdefs.h"
 #include "fe_utils/astreamer.h"
+#include "fe_utils/simple_list.h"
 #include "lib/stringinfo.h"
+
+#define TEMP_FILE_EXT	"waldump.tmp"
 
 extern int	WalSegSz;
 
@@ -31,13 +34,30 @@ typedef struct XLogDumpPrivate
 
 	astreamer  *archive_streamer;
 	StringInfo	archive_streamer_buf;	/* Buffer for receiving WAL data */
-	XLogRecPtr	archive_streamer_read_ptr; /* Populate the buffer with records
-											  until this record pointer */
+	XLogRecPtr	archive_streamer_read_ptr;	/* Populate the buffer with
+											 * records until this record
+											 * pointer */
+	char	   *tmpdir;			/* Temporary direcotry to export file */
+	SimpleStringList exportedSegList;	/* Temporary exported WAL file list */
 } XLogDumpPrivate;
 
+/*
+ * Generate the temporary WAL file path.
+ *
+ * Note that the caller is responsible to pfree it.
+ */
+static inline char *
+get_tmp_wal_file_path(XLogDumpPrivate *privateInfo, const char *fname)
+{
+	char	   *fpath = (char *) palloc(MAXPGPATH);
 
-extern astreamer *astreamer_waldump_new(XLogRecPtr startptr,
-										XLogRecPtr endptr,
+	snprintf(fpath, MAXPGPATH, "%s/%s.%s", privateInfo->tmpdir, fname,
+			 TEMP_FILE_EXT);
+
+	return fpath;
+}
+
+extern astreamer *astreamer_waldump_new(XLogRecPtr startptr, XLogRecPtr endptr,
 										XLogDumpPrivate *privateInfo);
 extern int astreamer_wal_read(char *readBuff, XLogRecPtr startptr, Size count,
 							  XLogDumpPrivate *privateInfo);

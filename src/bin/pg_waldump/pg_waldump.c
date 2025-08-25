@@ -370,6 +370,7 @@ init_tar_archive_reader(XLogDumpPrivate *private, const char *waldir,
 {
 	int			fd;
 	astreamer  *streamer;
+	char	   *tmpdir;
 
 	/* Open tar archive and store its file descriptor */
 	fd = open_file_in_directory(waldir, private->archive_name);
@@ -404,6 +405,15 @@ init_tar_archive_reader(XLogDumpPrivate *private, const char *waldir,
 		streamer = astreamer_zstd_decompressor_new(streamer);
 
 	private->archive_streamer = streamer;
+
+	/* Temporary space for writing WAL segments */
+	if (getenv("TMPDIR"))
+		tmpdir = pg_strdup(getenv("TMPDIR"));
+	else
+		tmpdir = waldir != NULL ? pg_strdup(waldir) : pg_strdup(".");
+	canonicalize_path(tmpdir);
+
+	private->tmpdir = tmpdir;
 }
 
 /*
@@ -412,6 +422,8 @@ init_tar_archive_reader(XLogDumpPrivate *private, const char *waldir,
 static void
 free_tar_archive_reader(XLogDumpPrivate *private)
 {
+	SimpleStringListCell *cell;
+
 	/*
 	 * NB: Normally, astreamer_finalize() is called before astreamer_free() to
 	 * flush any remaining buffered data or to ensure the end of the tar
@@ -425,6 +437,15 @@ free_tar_archive_reader(XLogDumpPrivate *private)
 	if (close(private->archive_fd) != 0)
 		pg_log_error("could not close file \"%s\": %m",
 					 private->archive_name);
+
+	/* Clear out any existing temporary files */
+	for (cell = private->exportedSegList.head; cell; cell = cell->next)
+	{
+		char	   *fpath = get_tmp_wal_file_path(private, cell->val);
+
+		unlink(fpath);
+		pfree(fpath);
+	}
 }
 
 /*
@@ -548,7 +569,7 @@ WALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 				XLogRecPtr targetPtr, char *readBuf)
 {
 	XLogDumpPrivate *private = state->private_data;
-	int			count = required_read_len(private, targetPtr, reqLen);
+	int			count = required_read_len(private, targetPagePtr, reqLen);
 	WALReadError errinfo;
 
 	if (private->endptr_reached)
@@ -607,12 +628,58 @@ TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 				   XLogRecPtr targetPtr, char *readBuf)
 {
 	XLogDumpPrivate *private = state->private_data;
-	int			count = required_read_len(private, targetPtr, reqLen);
+	int			count = required_read_len(private, targetPagePtr, reqLen);
+	XLogSegNo	nextSegNo;
 
 	if (private->endptr_reached)
 		return -1;
 
-	/* Read the WAL page from the archive streamer */
+	/*
+	 * If the target page is in a different segment, first check for the WAL
+	 * segment's physical existence in the temporary directory.
+	 */
+	nextSegNo = state->seg.ws_segno;
+	if (!XLByteInSeg(targetPagePtr, nextSegNo, WalSegSz))
+	{
+		char		fname[MAXPGPATH];
+		char	   *fpath;
+
+		if (state->seg.ws_file >= 0)
+		{
+			close(state->seg.ws_file);
+			state->seg.ws_file = -1;
+
+			/* Remove this file, as it is no longer needed. */
+			XLogFileName(fname, state->seg.ws_tli, nextSegNo, WalSegSz);
+			fpath = get_tmp_wal_file_path(private, fname);
+			unlink(fpath);
+			pfree(fpath);
+		}
+
+		XLByteToSeg(targetPagePtr, nextSegNo, WalSegSz);
+		state->seg.ws_tli = private->timeline;
+		state->seg.ws_segno = nextSegNo;
+
+		/*
+		 * If the next segment exists, open it and continue reading from there
+		 */
+		XLogFileName(fname, private->timeline, nextSegNo, WalSegSz);
+		if (simple_string_list_member(&private->exportedSegList, fname))
+		{
+			fpath = get_tmp_wal_file_path(private, fname);
+			state->seg.ws_file = open(fpath, O_RDONLY | PG_BINARY, 0);
+
+			if (state->seg.ws_file < 0)
+				pg_fatal("could not open file \"%s\": %m", fpath);
+		}
+	}
+
+	/* Continue reading from the open WAL segment, if any */
+	if (state->seg.ws_file >= 0)
+		return WALDumpReadPage(state, targetPagePtr, reqLen, targetPtr,
+							   readBuf);
+
+	/* Otherwise, read the WAL page from the archive streamer */
 	return astreamer_wal_read(readBuf, targetPagePtr, count, private);
 }
 
