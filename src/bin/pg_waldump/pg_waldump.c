@@ -43,6 +43,10 @@ static const char *progname;
 int			WalSegSz = DEFAULT_XLOG_SEG_SIZE;
 static volatile sig_atomic_t time_to_stop = false;
 
+/* Temporary exported WAL file directory and the list */
+char	   *TmpWalSegDir = NULL;
+SimpleStringList TmpWalSegList = {NULL, NULL};
+
 static const RelFileLocator emptyRelFileLocator = {0, 0, 0};
 
 typedef struct XLogDumpConfig
@@ -361,6 +365,41 @@ is_tar_file(const char *fname, pg_compress_algorithm *compression)
 }
 
 /*
+ * Set up a temporary directory to temporarily store WAL segments.
+ */
+static void
+setup_tmp_walseg_dir(const char *waldir)
+{
+	/*
+	 * Use the directory specified by the TEMDIR environment variable. If it's
+	 * not set, use the provided WAL directory.
+	 */
+	TmpWalSegDir = getenv("TMPDIR") ?
+		pg_strdup(getenv("TMPDIR")) : pg_strdup(waldir);
+	canonicalize_path(TmpWalSegDir);
+}
+
+/*
+ * Removes the temporarily store WAL segments, if any at exiting.
+ */
+static void
+remove_tmp_walseg_dir_atexit(void)
+{
+	SimpleStringListCell *cell;
+
+	/* Clear out any existing temporary files */
+	for (cell = TmpWalSegList.head; cell; cell = cell->next)
+	{
+		char	   *fpath = get_tmp_wal_file_path(cell->val);
+
+		if (unlink(fpath) == 0)
+			pg_log_info("removed file \"%s\"", fpath);
+		pfree(fpath);
+	}
+}
+
+
+/*
  * Initializes the tar archive reader and a temporary directory for WAL files.
  */
 static void
@@ -404,6 +443,7 @@ init_tar_archive_reader(XLogDumpPrivate *private, const char *waldir,
 		streamer = astreamer_zstd_decompressor_new(streamer);
 
 	private->archive_streamer = streamer;
+	private->curSegNo = 0;
 }
 
 /*
@@ -548,7 +588,7 @@ WALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 				XLogRecPtr targetPtr, char *readBuff)
 {
 	XLogDumpPrivate *private = state->private_data;
-	int			count = required_read_len(private, targetPtr, reqLen);
+	int			count = required_read_len(private, targetPagePtr, reqLen);
 	WALReadError errinfo;
 
 	if (private->endptr_reached)
@@ -607,12 +647,70 @@ TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 				   XLogRecPtr targetPtr, char *readBuff)
 {
 	XLogDumpPrivate *private = state->private_data;
-	int			count = required_read_len(private, targetPtr, reqLen);
+	int			count = required_read_len(private, targetPagePtr, reqLen);
+	XLogSegNo	nextSegNo;
 
 	if (private->endptr_reached)
 		return -1;
 
-	/* Read the WAL page from the archive streamer */
+	/*
+	 * If the target page is in a different segment, first check for the WAL
+	 * segment's physical existence in the temporary directory.
+	 */
+	nextSegNo = state->seg.ws_segno;
+	if (!XLByteInSeg(targetPagePtr, nextSegNo, WalSegSz))
+	{
+		char		fname[MAXFNAMELEN];
+		char	   *fpath;
+
+		if (state->seg.ws_file >= 0)
+		{
+			close(state->seg.ws_file);
+			state->seg.ws_file = -1;
+
+			/* Remove this file, as it is no longer needed. */
+			XLogFileName(fname, state->seg.ws_tli, nextSegNo, WalSegSz);
+			fpath = get_tmp_wal_file_path(fname);
+			pg_log_info("removing file \"%s\"", fpath);
+			unlink(fpath);
+			pfree(fpath);
+		}
+
+		XLByteToSeg(targetPagePtr, nextSegNo, WalSegSz);
+		state->seg.ws_tli = private->timeline;
+		state->seg.ws_segno = nextSegNo;
+
+		/*
+		 * If the next segment exists, open it and continue reading from there
+		 */
+		XLogFileName(fname, private->timeline, nextSegNo, WalSegSz);
+		if (simple_string_list_member(&TmpWalSegList, fname))
+		{
+			fpath = get_tmp_wal_file_path(fname);
+			state->seg.ws_file = open(fpath, O_RDONLY | PG_BINARY, 0);
+
+			if (state->seg.ws_file < 0)
+				pg_fatal("could not open file \"%s\": %m", fpath);
+			pfree(fpath);
+		}
+	}
+
+	/* Continue reading from the open WAL segment, if any */
+	if (state->seg.ws_file >= 0)
+	{
+		/*
+		 * To prevent a race condition where the archive streamer is still
+		 * exporting a file that we are trying to read, we invoke the streamer
+		 * to ensure enough data is available.
+		 */
+		if (private->curSegNo == state->seg.ws_segno)
+			astreamer_archive_read(private);
+
+		return WALDumpReadPage(state, targetPagePtr, reqLen, targetPtr,
+							   readBuff);
+	}
+
+	/* Otherwise, read the WAL page from the archive streamer */
 	return astreamer_wal_read(readBuff, targetPagePtr, count, private);
 }
 
@@ -1340,7 +1438,6 @@ main(int argc, char **argv)
 		if (fname != NULL && is_tar_file(fname, &compression))
 		{
 			private.archive_name = fname;
-			waldir = walpath ? pg_strdup(walpath) : pg_strdup(".");
 			is_tar = true;
 		}
 		else
@@ -1433,6 +1530,13 @@ main(int argc, char **argv)
 		/* Set up for reading tar file */
 		init_tar_archive_reader(&private, waldir, private.startptr,
 								private.endptr, compression);
+
+		/*
+		 * Setup temporary directory to store WAL segments and set up an exit
+		 * callback to remove it upon completion.
+		 */
+		setup_tmp_walseg_dir(waldir);
+		atexit(remove_tmp_walseg_dir_atexit);
 
 		/* Routine to decode WAL files in tar archive */
 		xlogreader_state =

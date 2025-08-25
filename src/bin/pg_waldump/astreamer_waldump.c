@@ -18,8 +18,8 @@
 
 #include "access/xlog_internal.h"
 #include "access/xlogdefs.h"
+#include "common/file_perm.h"
 #include "common/logging.h"
-#include "fe_utils/simple_list.h"
 #include "pg_waldump.h"
 
 /*
@@ -42,10 +42,11 @@ typedef struct astreamer_waldump
 
 	/* These fields change with archive member. */
 	bool		skipThisSeg;
+	bool		writeThisSeg;
+	FILE	   *segFp;
 	XLogSegNo	nextSegNo;		/* Next expected segment to stream */
 } astreamer_waldump;
 
-static int	astreamer_archive_read(XLogDumpPrivate *privateInfo);
 static void astreamer_waldump_content(astreamer *streamer,
 									  astreamer_member *member,
 									  const char *data, int len,
@@ -56,7 +57,12 @@ static void astreamer_waldump_free(astreamer *streamer);
 static bool member_is_relevant_wal(astreamer_waldump *mystreamer,
 								   astreamer_member *member,
 								   TimeLineID startTimeLineID,
+								   char **curFname,
 								   XLogSegNo *curSegNo);
+static FILE *member_prepare_tmp_write(XLogSegNo curSegNo,
+									  const char *fname);
+static XLogSegNo member_next_segno(XLogSegNo curSegNo,
+								   TimeLineID timeline);
 
 static const astreamer_ops astreamer_waldump_ops = {
 	.content = astreamer_waldump_content,
@@ -164,7 +170,7 @@ astreamer_wal_read(char *readBuff, XLogRecPtr targetPagePtr, Size count,
 /*
  * Reads the archive and passes it to the archive streamer for decompression.
  */
-static int
+int
 astreamer_archive_read(XLogDumpPrivate *privateInfo)
 {
 	int			rc;
@@ -208,16 +214,7 @@ astreamer_waldump_new(XLogRecPtr startptr, XLogRecPtr endPtr,
 	if (XLogRecPtrIsInvalid(startptr))
 		streamer->startSegNo = 0;
 	else
-	{
 		XLByteToSeg(startptr, streamer->startSegNo, WalSegSz);
-
-		/*
-		 * Initialize the record pointer to the beginning of the first
-		 * segment; this pointer will track the WAL record reading status.
-		 */
-		XLogSegNoOffsetToRecPtr(streamer->startSegNo, 0, WalSegSz,
-								privateInfo->archive_streamer_read_ptr);
-	}
 
 	if (XLogRecPtrIsInvalid(endPtr))
 		streamer->endSegNo = UINT64_MAX;
@@ -247,14 +244,16 @@ astreamer_waldump_content(astreamer *streamer, astreamer_member *member,
 	{
 		case ASTREAMER_MEMBER_HEADER:
 			{
-				XLogSegNo	segNo;
+				char	   *fname;
 
 				pg_log_debug("pg_waldump: reading \"%s\"", member->pathname);
 
 				mystreamer->skipThisSeg = false;
+				mystreamer->writeThisSeg = false;
 
 				if (!member_is_relevant_wal(mystreamer, member,
-											privateInfo->timeline, &segNo))
+											privateInfo->timeline,
+											&fname, &privateInfo->curSegNo))
 				{
 					mystreamer->skipThisSeg = true;
 					break;
@@ -267,33 +266,67 @@ astreamer_waldump_content(astreamer *streamer, astreamer_member *member,
 				if (READ_ANY_WAL(mystreamer))
 					break;
 
-				/* WAL segments must be archived in order */
-				if (mystreamer->nextSegNo != segNo)
+				/*
+				 * When WAL segments are not archived sequentially, it becomes
+				 * necessary to write out (or preserve) segments that might be
+				 * required at a later point.
+				 */
+				if (mystreamer->nextSegNo != privateInfo->curSegNo)
 				{
-					pg_log_error("WAL files are not archived in sequential order");
-					pg_log_error_detail("Expecting segment number " UINT64_FORMAT " but found " UINT64_FORMAT ".",
-										mystreamer->nextSegNo, segNo);
-					exit(1);
+					mystreamer->writeThisSeg = true;
+					mystreamer->segFp =
+						member_prepare_tmp_write(privateInfo->curSegNo, fname);
+					break;
 				}
 
 				/*
-				 * We track the reading of WAL segment records using a pointer
-				 * that's continuously incremented by the length of the
-				 * received data. This pointer is crucial for serving WAL page
-				 * requests from the WAL decoding routine, so it must be
-				 * accurate.
+				 * If the buffer contains data, the next WAL record must
+				 * logically follow it. Otherwise, this file isn't the one we
+				 * need, and we must export it.
 				 */
-#ifdef USE_ASSERT_CHECKING
-				if (mystreamer->nextSegNo != 0)
+				else if (privateInfo->archive_streamer_buf->len != 0)
 				{
 					XLogRecPtr	recPtr;
 
-					XLogSegNoOffsetToRecPtr(segNo, 0, WalSegSz, recPtr);
-					Assert(privateInfo->archive_streamer_read_ptr == recPtr);
+					XLogSegNoOffsetToRecPtr(privateInfo->curSegNo, 0, WalSegSz,
+											recPtr);
+
+					if (privateInfo->archive_streamer_read_ptr != recPtr)
+					{
+						mystreamer->writeThisSeg = true;
+						mystreamer->segFp =
+							member_prepare_tmp_write(privateInfo->curSegNo, fname);
+
+						/* Update the next expected segment number after this */
+						mystreamer->nextSegNo =
+							member_next_segno(privateInfo->curSegNo + 1,
+											  privateInfo->timeline);
+						break;
+					}
 				}
-#endif
+
+				Assert(!mystreamer->skipThisSeg);
+				Assert(!mystreamer->writeThisSeg);
+
+				/*
+				 * We are now streaming segment containt.
+				 *
+				 * We need to track the reading of WAL segment records using a
+				 * pointer that's typically incremented by the length of the
+				 * data read. However, we sometimes export the WAL file to
+				 * temporary storage, allowing the decoding routine to read
+				 * directly from there. This makes continuous pointer
+				 * incrementing challenging, as file reads can occur from any
+				 * offset, leading to potential errors. Therefore, we now
+				 * reset the pointer when reading from a file for streaming.
+				 */
+				XLogSegNoOffsetToRecPtr(privateInfo->curSegNo, 0, WalSegSz,
+										privateInfo->archive_streamer_read_ptr);
+
 				/* Update the next expected segment number */
-				mystreamer->nextSegNo += 1;
+				mystreamer->nextSegNo =
+					member_next_segno(privateInfo->curSegNo,
+									  privateInfo->timeline);
 			}
 			break;
 
@@ -302,12 +335,45 @@ astreamer_waldump_content(astreamer *streamer, astreamer_member *member,
 			if (mystreamer->skipThisSeg)
 				break;
 
+			/* Or, write contents to file */
+			if (mystreamer->writeThisSeg)
+			{
+				Assert(mystreamer->segFp != NULL);
+
+				errno = 0;
+				if (len > 0 && fwrite(data, len, 1, mystreamer->segFp) != 1)
+				{
+					char	   *fname;
+					int			pathlen = strlen(member->pathname);
+
+					Assert(pathlen >= XLOG_FNAME_LEN);
+
+					fname = member->pathname + (pathlen - XLOG_FNAME_LEN);
+
+					/*
+					 * If write didn't set errno, assume problem is no disk
+					 * space
+					 */
+					if (errno == 0)
+						errno = ENOSPC;
+					pg_fatal("could not write to file \"%s\": %m",
+							 get_tmp_wal_file_path(fname));
+				}
+				break;
+			}
+
 			/* Or, copy contents to buffer */
 			privateInfo->archive_streamer_read_ptr += len;
 			astreamer_buffer_bytes(streamer, &data, &len, len);
 			break;
 
 		case ASTREAMER_MEMBER_TRAILER:
+			if (mystreamer->segFp != NULL)
+			{
+				fclose(mystreamer->segFp);
+				mystreamer->segFp = NULL;
+			}
+			privateInfo->curSegNo = 0;
 			break;
 
 		case ASTREAMER_ARCHIVE_TRAILER:
@@ -334,7 +400,13 @@ astreamer_waldump_finalize(astreamer *streamer)
 static void
 astreamer_waldump_free(astreamer *streamer)
 {
+	astreamer_waldump *mystreamer;
+
 	Assert(streamer->bbs_next == NULL);
+
+	mystreamer = (astreamer_waldump *) streamer;
+	if (mystreamer->segFp != NULL)
+		fclose(mystreamer->segFp);
 
 	pfree(streamer->bbs_buffer.data);
 	pfree(streamer);
@@ -347,7 +419,8 @@ astreamer_waldump_free(astreamer *streamer)
  */
 static bool
 member_is_relevant_wal(astreamer_waldump *mystreamer, astreamer_member *member,
-					   TimeLineID startTimeLineID, XLogSegNo *curSegNo)
+					   TimeLineID startTimeLineID, char **curFname,
+					   XLogSegNo *curSegNo)
 {
 	int			pathlen;
 	XLogSegNo	segNo;
@@ -382,7 +455,84 @@ member_is_relevant_wal(astreamer_waldump *mystreamer, astreamer_member *member,
 			return false;
 	}
 
+	*curFname = fname;
 	*curSegNo = segNo;
 
 	return true;
+}
+
+/*
+ * Create an empty placeholder file and return its handle.  The file is also
+ * added to an exported list for future management, e.g.  access, deletion, and
+ * existence checks.
+ */
+static FILE *
+member_prepare_tmp_write(XLogSegNo curSegNo, const char *fname)
+{
+	FILE	   *file;
+	char	   *fpath = get_tmp_wal_file_path(fname);
+
+	/* Create an empty placeholder */
+	file = fopen(fpath, PG_BINARY_W);
+	if (file == NULL)
+		pg_fatal("could not create file \"%s\": %m", fpath);
+
+#ifndef WIN32
+	if (chmod(fpath, pg_file_create_mode))
+		pg_fatal("could not set permissions on file \"%s\": %m",
+				 fpath);
+#endif
+
+	pg_log_info("temporarily exporting file \"%s\"", fpath);
+
+	/* Record this segment's export */
+	simple_string_list_append(&TmpWalSegList, fname);
+	pfree(fpath);
+
+	return file;
+}
+
+/*
+ * Get next WAL segment that needs to be retrieved from the archive.
+ *
+ * The function checks for the presence of a previously read and extracted WAL
+ * segment in the temporary storage. If a temporary file is found for that
+ * segment, it indicates the segment has already been successfully retrieved
+ * from the archive. In this case, the function increments the segment number
+ * and repeats the check. This process continues until a segment that has not
+ * yet been retrieved is found, at which point the function returns its number.
+ */
+static XLogSegNo
+member_next_segno(XLogSegNo curSegNo, TimeLineID timeline)
+{
+	XLogSegNo	nextSegNo = curSegNo + 1;
+	bool		exists;
+
+	/*
+	 * If we find a file that was previously written to the temporary space,
+	 * it indicates that the corresponding WAL segment request has already
+	 * been fulfilled. In that case, we increment the nextSegNo counter and
+	 * check again whether that segment number again. if found above steps
+	 * will be return if not then we return that segment number which would be
+	 * needed from the archive.
+	 */
+	do
+	{
+		char		fname[MAXFNAMELEN];
+
+		XLogFileName(fname, timeline, nextSegNo, WalSegSz);
+
+		/*
+		 * If the WAL segment has already been exported, increment the counter
+		 * and check for the next segment.
+		 */
+		exists = false;
+		if (simple_string_list_member(&TmpWalSegList, fname))
+		{
+			nextSegNo += 1;
+			exists = true;
+		}
+	} while (exists);
+
+	return nextSegNo;
 }
