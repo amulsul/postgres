@@ -361,16 +361,29 @@ is_tar_file(const char *fname, pg_compress_algorithm *compression)
 }
 
 /*
- * Creates an appropriate chain of archive streamers for reading the given
- * tar archive.
+ * Initializes the tar archive reader and a temporary directory for WAL files.
  */
 static void
-setup_astreamer(XLogDumpPrivate *private, pg_compress_algorithm compression,
-				XLogRecPtr startptr, XLogRecPtr endptr)
+init_tar_archive_reader(XLogDumpPrivate *private, const char *waldir,
+						XLogRecPtr startptr, XLogRecPtr endptr,
+						pg_compress_algorithm compression)
 {
-	astreamer  *streamer = NULL;
+	int			fd;
+	astreamer  *streamer;
 
-	streamer = astreamer_waldump_content_new(NULL, startptr, endptr, private);
+	/* Open tar archive and store its file descriptor */
+	fd = open_file_in_directory(waldir, private->archive_name);
+
+	if (fd < 0)
+		pg_fatal("could not open file \"%s\"", private->archive_name);
+
+	private->archive_fd = fd;
+
+	/*
+	 * Create an appropriate chain of archive streamers for reading the given
+	 * tar archive.
+	 */
+	streamer = astreamer_waldump_new(startptr, endptr, private);
 
 	/*
 	 * Final extracted WAL data will reside in this streamer. However, since
@@ -391,27 +404,6 @@ setup_astreamer(XLogDumpPrivate *private, pg_compress_algorithm compression,
 		streamer = astreamer_zstd_decompressor_new(streamer);
 
 	private->archive_streamer = streamer;
-}
-
-/*
- * Initializes the archive reader for a tar file.
- */
-static void
-init_tar_archive_reader(XLogDumpPrivate *private, char *waldir,
-						pg_compress_algorithm compression)
-{
-	int			fd;
-
-	/* Now, the tar archive and store its file descriptor */
-	fd = open_file_in_directory(waldir, private->archive_name);
-
-	if (fd < 0)
-		pg_fatal("could not open file \"%s\"", private->archive_name);
-
-	private->archive_fd = fd;
-
-	/* Setup tar archive reading facility */
-	setup_astreamer(private, compression, private->startptr, private->endptr);
 }
 
 /*
@@ -445,13 +437,9 @@ verify_tar_archive(XLogDumpPrivate *private, const char *waldir,
 	PGAlignedXLogBlock buf;
 	int			r;
 
-	setup_astreamer(private, compression, InvalidXLogRecPtr, InvalidXLogRecPtr);
-
-	/* Now, the tar archive and store its file descriptor */
-	private->archive_fd = open_file_in_directory(waldir, private->archive_name);
-
-	if (private->archive_fd < 0)
-		pg_fatal("could not open file \"%s\"", private->archive_name);
+	/* Initialize the reader to stream WAL data from a tar file */
+	init_tar_archive_reader(private, waldir, InvalidXLogRecPtr,
+							InvalidXLogRecPtr, compression);
 
 	/* Read a wal page */
 	r = astreamer_wal_read(buf.data, InvalidXLogRecPtr, XLOG_BLCKSZ, private);
@@ -557,7 +545,7 @@ WALDumpCloseSegment(XLogReaderState *state)
 /* pg_waldump's XLogReaderRoutine->page_read callback */
 static int
 WALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
-				XLogRecPtr targetPtr, char *readBuff)
+				XLogRecPtr targetPtr, char *readBuf)
 {
 	XLogDumpPrivate *private = state->private_data;
 	int			count = required_read_len(private, targetPtr, reqLen);
@@ -566,7 +554,7 @@ WALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 	if (private->endptr_reached)
 		return -1;
 
-	if (!WALRead(state, readBuff, targetPagePtr, count, private->timeline,
+	if (!WALRead(state, readBuf, targetPagePtr, count, private->timeline,
 				 &errinfo))
 	{
 		WALOpenSegment *seg = &errinfo.wre_seg;
@@ -616,7 +604,7 @@ TarWALDumpCloseSegment(XLogReaderState *state)
  */
 static int
 TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
-				   XLogRecPtr targetPtr, char *readBuff)
+				   XLogRecPtr targetPtr, char *readBuf)
 {
 	XLogDumpPrivate *private = state->private_data;
 	int			count = required_read_len(private, targetPtr, reqLen);
@@ -625,7 +613,7 @@ TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 		return -1;
 
 	/* Read the WAL page from the archive streamer */
-	return astreamer_wal_read(readBuff, targetPagePtr, count, private);
+	return astreamer_wal_read(readBuf, targetPagePtr, count, private);
 }
 
 /*
@@ -1429,7 +1417,8 @@ main(int argc, char **argv)
 	if (is_tar)
 	{
 		/* Set up for reading tar file */
-		init_tar_archive_reader(&private, waldir, compression);
+		init_tar_archive_reader(&private, waldir, private.startptr,
+								private.endptr, compression);
 
 		/* Routine to decode WAL files in tar archive */
 		xlogreader_state =

@@ -63,14 +63,14 @@ static const astreamer_ops astreamer_waldump_ops = {
 };
 
 /*
- * Copies WAL data from astreamer to readBuff; if unavailable, fetches more
+ * Copies WAL data from astreamer to readBuf; if unavailable, fetches more
  * from the tar archive via astreamer.
  */
 int
-astreamer_wal_read(char *readBuff, XLogRecPtr targetPagePtr, Size count,
+astreamer_wal_read(char *readBuf, XLogRecPtr targetPagePtr, Size count,
 				   XLogDumpPrivate *privateInfo)
 {
-	char	   *p = readBuff;
+	char	   *p = readBuf;
 	Size		nbytes = count;
 	XLogRecPtr	recptr = targetPagePtr;
 	volatile StringInfo astreamer_buf = privateInfo->archive_streamer_buf;
@@ -174,8 +174,8 @@ astreamer_archive_read(XLogDumpPrivate *privateInfo)
  * Create an astreamer that can read WAL from tar file.
  */
 astreamer *
-astreamer_waldump_content_new(astreamer *next, XLogRecPtr startptr,
-							  XLogRecPtr endPtr, XLogDumpPrivate *privateInfo)
+astreamer_waldump_new(XLogRecPtr startptr, XLogRecPtr endPtr,
+					  XLogDumpPrivate *privateInfo)
 {
 	astreamer_waldump *streamer;
 
@@ -183,7 +183,6 @@ astreamer_waldump_content_new(astreamer *next, XLogRecPtr startptr,
 	*((const astreamer_ops **) &streamer->base.bbs_ops) =
 		&astreamer_waldump_ops;
 
-	streamer->base.bbs_next = next;
 	initStringInfo(&streamer->base.bbs_buffer);
 
 	if (XLogRecPtrIsInvalid(startptr))
