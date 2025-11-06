@@ -466,11 +466,50 @@ TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 {
 	XLogDumpPrivate *private = state->private_data;
 	int			count = required_read_len(private, targetPagePtr, reqLen);
+	XLogSegNo	nextSegNo;
 
 	if (private->endptr_reached)
 		return -1;
 
-	/* Read the WAL page from the archive streamer */
+	/*
+	 * If the target page is in a different segment, first check for the WAL
+	 * segment's physical existence in the temporary directory.
+	 */
+	nextSegNo = state->seg.ws_segno;
+	if (!XLByteInSeg(targetPagePtr, nextSegNo, WalSegSz))
+	{
+		if (state->seg.ws_file >= 0)
+		{
+			close(state->seg.ws_file);
+			state->seg.ws_file = -1;
+
+			/* Remove this file, as it is no longer needed. */
+			remove_tmp_walseg(nextSegNo, true);
+		}
+
+		XLByteToSeg(targetPagePtr, nextSegNo, WalSegSz);
+		state->seg.ws_tli = private->timeline;
+		state->seg.ws_segno = nextSegNo;
+
+		/*
+		 * If the next segment exists, open it and continue reading from there
+		 */
+		if (tmp_walseg_exists(nextSegNo))
+		{
+			char	   *fpath;
+
+			fpath = get_tmp_walseg_path(nextSegNo);
+			state->seg.ws_file = open(fpath, O_RDONLY | PG_BINARY, 0);
+			pfree(fpath);
+		}
+	}
+
+	/* Continue reading from the open WAL segment, if any */
+	if (state->seg.ws_file >= 0)
+		return WALDumpReadPage(state, targetPagePtr, count, targetPtr,
+							   readBuff);
+
+	/* Otherwise, read the WAL page from the archive streamer */
 	return read_archive_wal_page(private, targetPagePtr, count, readBuff);
 }
 

@@ -58,4 +58,8 @@ extern int	read_archive_wal_page(XLogDumpPrivate *privateInfo,
 								  XLogRecPtr targetPagePtr,
 								  Size count, char *readBuff);
 
+extern char *get_tmp_walseg_path(XLogSegNo segno);
+extern bool tmp_walseg_exists(XLogSegNo segno);
+extern void remove_tmp_walseg(XLogSegNo segno, bool update_entry);
+
 #endif							/* end of PG_WALDUMP_H */
