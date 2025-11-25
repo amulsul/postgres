@@ -93,7 +93,7 @@ static void verify_file_checksum(verifier_context *context,
 								 uint8 *buffer);
 static void parse_required_wal(verifier_context *context,
 							   char *pg_waldump_path,
-							   char *wal_directory);
+							   char *wal_path);
 static astreamer *create_archive_verifier(verifier_context *context,
 										  char *archive_name,
 										  Oid tblspc_oid,
@@ -126,7 +126,7 @@ main(int argc, char **argv)
 		{"progress", no_argument, NULL, 'P'},
 		{"quiet", no_argument, NULL, 'q'},
 		{"skip-checksums", no_argument, NULL, 's'},
-		{"wal-directory", required_argument, NULL, 'w'},
+		{"wal-path", required_argument, NULL, 'w'},
 		{NULL, 0, NULL, 0}
 	};
 
@@ -135,7 +135,7 @@ main(int argc, char **argv)
 	char	   *manifest_path = NULL;
 	bool		no_parse_wal = false;
 	bool		quiet = false;
-	char	   *wal_directory = NULL;
+	char	   *wal_path = NULL;
 	char	   *pg_waldump_path = NULL;
 	DIR		   *dir;
 
@@ -221,8 +221,8 @@ main(int argc, char **argv)
 				context.skip_checksums = true;
 				break;
 			case 'w':
-				wal_directory = pstrdup(optarg);
-				canonicalize_path(wal_directory);
+				wal_path = pstrdup(optarg);
+				canonicalize_path(wal_path);
 				break;
 			default:
 				/* getopt_long already emitted a complaint */
@@ -365,15 +365,15 @@ main(int argc, char **argv)
 		verify_backup_checksums(&context);
 
 	/* By default, look for the WAL in the backup directory, too. */
-	if (wal_directory == NULL)
-		wal_directory = psprintf("%s/pg_wal", context.backup_directory);
+	if (wal_path == NULL)
+		wal_path = psprintf("%s/pg_wal", context.backup_directory);
 
 	/*
 	 * Try to parse the required ranges of WAL records, unless we were told
 	 * not to do so.
 	 */
 	if (!no_parse_wal)
-		parse_required_wal(&context, pg_waldump_path, wal_directory);
+		parse_required_wal(&context, pg_waldump_path, wal_path);
 
 	/*
 	 * If everything looks OK, tell the user this, unless we were asked to
@@ -1198,7 +1198,7 @@ verify_file_checksum(verifier_context *context, manifest_file *m,
  */
 static void
 parse_required_wal(verifier_context *context, char *pg_waldump_path,
-				   char *wal_directory)
+				   char *wal_path)
 {
 	manifest_data *manifest = context->manifest;
 	manifest_wal_range *this_wal_range = manifest->first_wal_range;
@@ -1208,7 +1208,7 @@ parse_required_wal(verifier_context *context, char *pg_waldump_path,
 		char	   *pg_waldump_cmd;
 
 		pg_waldump_cmd = psprintf("\"%s\" --quiet --path=\"%s\" --timeline=%u --start=%X/%08X --end=%X/%08X\n",
-								  pg_waldump_path, wal_directory, this_wal_range->tli,
+								  pg_waldump_path, wal_path, this_wal_range->tli,
 								  LSN_FORMAT_ARGS(this_wal_range->start_lsn),
 								  LSN_FORMAT_ARGS(this_wal_range->end_lsn));
 		fflush(NULL);
@@ -1376,7 +1376,7 @@ usage(void)
 	printf(_("  -P, --progress              show progress information\n"));
 	printf(_("  -q, --quiet                 do not print any output, except for errors\n"));
 	printf(_("  -s, --skip-checksums        skip checksum verification\n"));
-	printf(_("  -w, --wal-directory=PATH    use specified path for WAL files\n"));
+	printf(_("  -w, --wal-path=PATH         use specified path for WAL files\n"));
 	printf(_("  -V, --version               output version information, then exit\n"));
 	printf(_("  -?, --help                  show this help, then exit\n"));
 	printf(_("\nReport bugs to <%s>.\n"), PACKAGE_BUGREPORT);
