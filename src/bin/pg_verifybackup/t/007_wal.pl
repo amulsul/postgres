@@ -90,4 +90,20 @@ command_ok(
 	[ 'pg_verifybackup', $backup_path2 ],
 	'valid base backup with timeline > 1');
 
+# Test WAL verification for a tar-format backup with a separate pg_wal.tar,
+# as produced by pg_basebackup --format=tar --wal-method=stream.
+my $backup_path3 = $primary->backup_dir . '/test_tar_wal';
+$primary->command_ok(
+	[
+		'pg_basebackup',
+		'--pgdata' => $backup_path3,
+		'--no-sync',
+		'--format' => 'tar',
+		'--checkpoint' => 'fast'
+	],
+	"tar backup with separate pg_wal.tar");
+command_ok(
+	[ 'pg_verifybackup', $backup_path3 ],
+	'WAL verification succeeds with separate pg_wal.tar');
+
 done_testing();
