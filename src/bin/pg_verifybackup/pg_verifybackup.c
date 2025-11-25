@@ -74,7 +74,9 @@ pg_noreturn static void report_manifest_error(JsonManifestParseContext *context,
 											  const char *fmt,...)
 			pg_attribute_printf(2, 3);
 
-static void verify_tar_backup(verifier_context *context, DIR *dir);
+static void verify_tar_backup(verifier_context *context, DIR *dir,
+							  char **base_archive_path,
+							  char **wal_archive_path);
 static void verify_plain_backup_directory(verifier_context *context,
 										  char *relpath, char *fullpath,
 										  DIR *dir);
@@ -83,7 +85,9 @@ static void verify_plain_backup_file(verifier_context *context, char *relpath,
 static void verify_control_file(const char *controlpath,
 								uint64 manifest_system_identifier);
 static void precheck_tar_backup_file(verifier_context *context, char *relpath,
-									 char *fullpath, SimplePtrList *tarfiles);
+									 char *fullpath, SimplePtrList *tarfiles,
+									 char **base_archive_path,
+									 char **wal_archive_path);
 static void verify_tar_file(verifier_context *context, char *relpath,
 							char *fullpath, astreamer *streamer);
 static void report_extra_backup_files(verifier_context *context);
@@ -136,6 +140,8 @@ main(int argc, char **argv)
 	bool		no_parse_wal = false;
 	bool		quiet = false;
 	char	   *wal_path = NULL;
+	char	   *base_archive_path = NULL;
+	char	   *wal_archive_path = NULL;
 	char	   *pg_waldump_path = NULL;
 	DIR		   *dir;
 
@@ -328,17 +334,6 @@ main(int argc, char **argv)
 	}
 
 	/*
-	 * XXX: In the future, we should consider enhancing pg_waldump to read WAL
-	 * files from an archive.
-	 */
-	if (!no_parse_wal && context.format == 't')
-	{
-		pg_log_error("pg_waldump cannot read tar files");
-		pg_log_error_hint("You must use -n/--no-parse-wal when verifying a tar-format backup.");
-		exit(1);
-	}
-
-	/*
 	 * Perform the appropriate type of verification appropriate based on the
 	 * backup format. This will close 'dir'.
 	 */
@@ -346,7 +341,7 @@ main(int argc, char **argv)
 		verify_plain_backup_directory(&context, NULL, context.backup_directory,
 									  dir);
 	else
-		verify_tar_backup(&context, dir);
+		verify_tar_backup(&context, dir, &base_archive_path, &wal_archive_path);
 
 	/*
 	 * The "matched" flag should now be set on every entry in the hash table.
@@ -364,9 +359,28 @@ main(int argc, char **argv)
 	if (context.format == 'p' && !context.skip_checksums)
 		verify_backup_checksums(&context);
 
-	/* By default, look for the WAL in the backup directory, too. */
+	/*
+	 * By default, WAL files are expected to be found in the backup directory
+	 * for plain-format backups. In the case of tar-format backups, if a
+	 * separate WAL archive is not found, the WAL files are most likely
+	 * included within the main data directory archive.
+	 */
 	if (wal_path == NULL)
-		wal_path = psprintf("%s/pg_wal", context.backup_directory);
+	{
+		if (context.format == 'p')
+			wal_path = psprintf("%s/pg_wal", context.backup_directory);
+		else if (wal_archive_path)
+			wal_path = wal_archive_path;
+		else if (base_archive_path)
+			wal_path = base_archive_path;
+		else
+		{
+			pg_log_error("WAL archive not found");
+			pg_log_error_hint("Specify the correct path using the option -w/--wal-path.  "
+							  "Or you must use -n/--no-parse-wal when verifying a tar-format backup.");
+			exit(1);
+		}
+	}
 
 	/*
 	 * Try to parse the required ranges of WAL records, unless we were told
@@ -787,7 +801,8 @@ verify_control_file(const char *controlpath, uint64 manifest_system_identifier)
  * close when we're done with it.
  */
 static void
-verify_tar_backup(verifier_context *context, DIR *dir)
+verify_tar_backup(verifier_context *context, DIR *dir, char **base_archive_path,
+				  char **wal_archive_path)
 {
 	struct dirent *dirent;
 	SimplePtrList tarfiles = {NULL, NULL};
@@ -816,7 +831,8 @@ verify_tar_backup(verifier_context *context, DIR *dir)
 			char	   *fullpath;
 
 			fullpath = psprintf("%s/%s", context->backup_directory, filename);
-			precheck_tar_backup_file(context, filename, fullpath, &tarfiles);
+			precheck_tar_backup_file(context, filename, fullpath, &tarfiles,
+									 base_archive_path, wal_archive_path);
 			pfree(fullpath);
 		}
 	}
@@ -875,11 +891,13 @@ verify_tar_backup(verifier_context *context, DIR *dir)
  *
  * The arguments to this function are mostly the same as the
  * verify_plain_backup_file. The additional argument outputs a list of valid
- * tar files.
+ * tar files, along with the full paths to the main archive and the WAL
+ * directory archive.
  */
 static void
 precheck_tar_backup_file(verifier_context *context, char *relpath,
-						 char *fullpath, SimplePtrList *tarfiles)
+						 char *fullpath, SimplePtrList *tarfiles,
+						 char **base_archive_path, char **wal_archive_path)
 {
 	struct stat sb;
 	Oid			tblspc_oid = InvalidOid;
@@ -918,9 +936,17 @@ precheck_tar_backup_file(verifier_context *context, char *relpath,
 	 * extension such as .gz, .lz4, or .zst.
 	 */
 	if (strncmp("base", relpath, 4) == 0)
+	{
 		suffix = relpath + 4;
+
+		*base_archive_path = pstrdup(fullpath);
+	}
 	else if (strncmp("pg_wal", relpath, 6) == 0)
+	{
 		suffix = relpath + 6;
+
+		*wal_archive_path = pstrdup(fullpath);
+	}
 	else
 	{
 		/* Expected a <tablespaceoid>.tar file here. */
