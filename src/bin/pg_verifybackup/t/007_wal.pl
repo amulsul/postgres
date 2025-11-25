@@ -42,10 +42,10 @@ command_ok([ 'pg_verifybackup', '--no-parse-wal', $backup_path ],
 command_ok(
 	[
 		'pg_verifybackup',
-		'--wal-directory' => $relocated_pg_wal,
+		'--wal-path' => $relocated_pg_wal,
 		$backup_path
 	],
-	'--wal-directory can be used to specify WAL directory');
+	'--wal-path can be used to specify WAL directory');
 
 # Move directory back to original location.
 rename($relocated_pg_wal, $original_pg_wal) || die "rename pg_wal back: $!";
