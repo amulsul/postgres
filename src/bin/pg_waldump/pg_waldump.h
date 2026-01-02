@@ -12,6 +12,10 @@
 #define PG_WALDUMP_H
 
 #include "access/xlogdefs.h"
+#include "fe_utils/astreamer.h"
+
+/* Forward declaration */
+struct ArchivedWALEntry;
 
 /* Contains the necessary information to drive WAL decoding */
 typedef struct XLogDumpPrivate
@@ -20,6 +24,36 @@ typedef struct XLogDumpPrivate
 	XLogRecPtr	startptr;
 	XLogRecPtr	endptr;
 	bool		endptr_reached;
+
+	/* Fields required to read WAL from archive */
+	char	   *archive_name;	/* Tar archive name */
+	int			archive_fd;		/* File descriptor for the open tar file */
+
+	astreamer  *archive_streamer;
+
+	/* What the archive streamer is currently reading */
+	struct ArchivedWALEntry *cur_wal;
+
+	/*
+	 * Although these values can be easily derived from startptr and endptr,
+	 * doing so repeatedly for each archived member would be inefficient, as
+	 * it would involve recalculating and filtering out irrelevant WAL
+	 * segments.
+	 */
+	XLogSegNo	startSegNo;
+	XLogSegNo	endSegNo;
 } XLogDumpPrivate;
+
+extern int	open_file_in_directory(const char *directory, const char *fname);
+
+extern bool is_archive_file(const char *fname,
+							pg_compress_algorithm *compression);
+extern void init_archive_reader(XLogDumpPrivate *privateInfo,
+								const char *waldir,
+								pg_compress_algorithm compression);
+extern void free_archive_reader(XLogDumpPrivate *privateInfo);
+extern int	read_archive_wal_page(XLogDumpPrivate *privateInfo,
+								  XLogRecPtr targetPagePtr,
+								  Size count, char *readBuff);
 
 #endif							/* end of PG_WALDUMP_H */
