@@ -29,6 +29,7 @@
 #include "common/logging.h"
 #include "common/relpath.h"
 #include "getopt_long.h"
+#include "pg_waldump.h"
 #include "rmgrdesc.h"
 #include "storage/bufpage.h"
 
@@ -42,14 +43,6 @@ static const char *progname;
 static volatile sig_atomic_t time_to_stop = false;
 
 static const RelFileLocator emptyRelFileLocator = {0, 0, 0};
-
-typedef struct XLogDumpPrivate
-{
-	TimeLineID	timeline;
-	XLogRecPtr	startptr;
-	XLogRecPtr	endptr;
-	bool		endptr_reached;
-} XLogDumpPrivate;
 
 typedef struct XLogDumpConfig
 {
