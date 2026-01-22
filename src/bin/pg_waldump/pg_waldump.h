@@ -49,11 +49,12 @@ extern int	open_file_in_directory(const char *directory, const char *fname);
 extern bool is_archive_file(const char *fname,
 							pg_compress_algorithm *compression);
 extern void init_archive_reader(XLogDumpPrivate *privateInfo,
-								const char *waldir,
+								const char *waldir, int *WalSegSz,
 								pg_compress_algorithm compression);
 extern void free_archive_reader(XLogDumpPrivate *privateInfo);
 extern int	read_archive_wal_page(XLogDumpPrivate *privateInfo,
 								  XLogRecPtr targetPagePtr,
-								  Size count, char *readBuff);
+								  Size count, char *readBuff,
+								  int WalSegSz);
 
 #endif							/* end of PG_WALDUMP_H */

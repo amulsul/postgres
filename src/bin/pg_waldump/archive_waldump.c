@@ -63,7 +63,8 @@ typedef struct astreamer_waldump
 
 static int	read_archive_file(XLogDumpPrivate *privateInfo, Size count);
 static ArchivedWALEntry *get_archive_wal_entry(XLogSegNo segno,
-											   XLogDumpPrivate *privateInfo);
+											   XLogDumpPrivate *privateInfo,
+											   int WalSegSz);
 
 static astreamer *astreamer_waldump_new(XLogDumpPrivate *privateInfo);
 static void astreamer_waldump_content(astreamer *streamer,
@@ -125,7 +126,7 @@ is_archive_file(const char *fname, pg_compress_algorithm *compression)
  */
 void
 init_archive_reader(XLogDumpPrivate *privateInfo, const char *waldir,
-					pg_compress_algorithm compression)
+					int *WalSegSz, pg_compress_algorithm compression)
 {
 	int			fd;
 	astreamer  *streamer;
@@ -174,29 +175,29 @@ init_archive_reader(XLogDumpPrivate *privateInfo, const char *waldir,
 	/* Set WalSegSz if WAL data is successfully read */
 	longhdr = (XLogLongPageHeader) entry->buf.data;
 
-	WalSegSz = longhdr->xlp_seg_size;
-
-	if (!IsValidWalSegSize(WalSegSz))
+	if (!IsValidWalSegSize(longhdr->xlp_seg_size))
 	{
 		pg_log_error(ngettext("invalid WAL segment size in WAL file from archive \"%s\" (%d byte)",
 							  "invalid WAL segment size in WAL file from archive \"%s\" (%d bytes)",
-							  WalSegSz),
-					 privateInfo->archive_name, WalSegSz);
+							  longhdr->xlp_seg_size),
+					 privateInfo->archive_name, longhdr->xlp_seg_size);
 		pg_log_error_detail("The WAL segment size must be a power of two between 1 MB and 1 GB.");
 		exit(1);
 	}
+
+	*WalSegSz = longhdr->xlp_seg_size;
 
 	/*
 	 * With the WAL segment size available, we can now initialize the
 	 * dependent start and end segment numbers.
 	 */
 	Assert(!XLogRecPtrIsInvalid(privateInfo->startptr));
-	XLByteToSeg(privateInfo->startptr, privateInfo->startSegNo, WalSegSz);
+	XLByteToSeg(privateInfo->startptr, privateInfo->startSegNo, *WalSegSz);
 
 	if (XLogRecPtrIsInvalid(privateInfo->endptr))
 		privateInfo->endSegNo = UINT64_MAX;
 	else
-		XLByteToSeg(privateInfo->endptr, privateInfo->endSegNo, WalSegSz);
+		XLByteToSeg(privateInfo->endptr, privateInfo->endSegNo, *WalSegSz);
 }
 
 /*
@@ -226,7 +227,7 @@ free_archive_reader(XLogDumpPrivate *privateInfo)
  */
 int
 read_archive_wal_page(XLogDumpPrivate *privateInfo, XLogRecPtr targetPagePtr,
-					  Size count, char *readBuff)
+					  Size count, char *readBuff, int WalSegSz)
 {
 	char	   *p = readBuff;
 	Size		nbytes = count;
@@ -235,7 +236,7 @@ read_archive_wal_page(XLogDumpPrivate *privateInfo, XLogRecPtr targetPagePtr,
 	ArchivedWALEntry *entry;
 
 	XLByteToSeg(targetPagePtr, segno, WalSegSz);
-	entry = get_archive_wal_entry(segno, privateInfo);
+	entry = get_archive_wal_entry(segno, privateInfo, WalSegSz);
 
 	while (nbytes > 0)
 	{
@@ -375,7 +376,8 @@ read_archive_file(XLogDumpPrivate *privateInfo, Size count)
  * entry in the hash table.
  */
 static ArchivedWALEntry *
-get_archive_wal_entry(XLogSegNo segno, XLogDumpPrivate *privateInfo)
+get_archive_wal_entry(XLogSegNo segno, XLogDumpPrivate *privateInfo,
+					  int WalSegSz)
 {
 	ArchivedWALEntry *entry = NULL;
 	char		fname[MAXFNAMELEN];
@@ -393,7 +395,7 @@ get_archive_wal_entry(XLogSegNo segno, XLogDumpPrivate *privateInfo)
 
 		/* Fetch more data */
 		if (read_archive_file(privateInfo, READ_CHUNK_SIZE) == 0)
-			break;			/* archive file ended */
+			break;				/* archive file ended */
 
 		/*
 		 * Either, here for the first time, or the archived streamer is
@@ -421,8 +423,8 @@ get_archive_wal_entry(XLogSegNo segno, XLogDumpPrivate *privateInfo)
 		/*
 		 * XXX: If the segment being read not the requested one, the data must
 		 * be buffered, as we currently lack the mechanism to write it to a
-		 * temporary file. This is a known limitation that will be fixed in the
-		 * next patch, as the buffer could grow up to the full WAL segment
+		 * temporary file. This is a known limitation that will be fixed in
+		 * the next patch, as the buffer could grow up to the full WAL segment
 		 * size.
 		 */
 		if (segno > entry->segno)
@@ -585,7 +587,8 @@ member_is_wal_file(astreamer_waldump *mystreamer, astreamer_member *member,
 		return false;
 
 	/* Parse position from file */
-	XLogFromFileName(fname, &timeline, &segNo, WalSegSz);
+	/* TODO:this is wrong */
+	XLogFromFileName(fname, &timeline, &segNo, DEFAULT_XLOG_SEG_SIZE);
 
 	*curSegNo = segNo;
 	*curTimeline = timeline;

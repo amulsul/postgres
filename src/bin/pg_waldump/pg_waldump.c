@@ -476,7 +476,8 @@ TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 		return -1;
 
 	/* Read the WAL page from the archive streamer */
-	return read_archive_wal_page(private, targetPagePtr, count, readBuff);
+	return read_archive_wal_page(private, targetPagePtr, count, readBuff,
+								 state->segcxt.ws_segsize);
 }
 
 /*
@@ -1271,7 +1272,7 @@ main(int argc, char **argv)
 		}
 	}
 	else if (!is_archive)
-		waldir = identify_target_directory(walpath, NULL);
+		waldir = identify_target_directory(walpath, NULL, &WalSegSz);
 
 	/* we don't know what to print */
 	if (!XLogRecPtrIsValid(private.startptr))
@@ -1292,7 +1293,7 @@ main(int argc, char **argv)
 		waldir = waldir ? pg_strdup(waldir) : pg_strdup(".");
 
 		/* Set up for reading tar file */
-		init_archive_reader(&private, waldir, compression);
+		init_archive_reader(&private, waldir, &WalSegSz, compression);
 
 		/* Routine to decode WAL files in tar archive */
 		xlogreader_state =
