@@ -15,7 +15,8 @@
 #include "fe_utils/astreamer.h"
 
 /* Forward declaration */
-struct ArchivedWALEntry;
+struct ArchivedWALFile;
+struct ArchivedWAL_hash;
 
 /* Contains the necessary information to drive WAL decoding */
 typedef struct XLogDumpPrivate
@@ -32,7 +33,13 @@ typedef struct XLogDumpPrivate
 	astreamer  *archive_streamer;
 
 	/* What the archive streamer is currently reading */
-	struct ArchivedWALEntry *cur_wal;
+	struct ArchivedWALFile *cur_file;
+
+	/*
+	 * Hash table of all WAL files that the archive stream has read, including
+	 * the one currently in progress.
+	 */
+	struct ArchivedWAL_hash *archive_wal_htab;
 
 	/*
 	 * Although these values can be easily derived from startptr and endptr,

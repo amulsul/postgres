@@ -28,7 +28,7 @@
 #define READ_CHUNK_SIZE				(128 * 1024)
 
 /* Hash entry structure for holding WAL segment data read from the archive */
-typedef struct ArchivedWALEntry
+typedef struct ArchivedWALFile
 {
 	uint32		status;			/* hash status */
 	XLogSegNo	segno;			/* hash key: WAL segment number */
@@ -38,10 +38,10 @@ typedef struct ArchivedWALEntry
 	bool		tmpseg_exists;	/* spill file exists? */
 
 	int			total_read;		/* total read of archived WAL segment */
-} ArchivedWALEntry;
+} ArchivedWALFile;
 
 #define SH_PREFIX				ArchivedWAL
-#define SH_ELEMENT_TYPE			ArchivedWALEntry
+#define SH_ELEMENT_TYPE			ArchivedWALFile
 #define SH_KEY_TYPE				XLogSegNo
 #define SH_KEY					segno
 #define SH_HASH_KEY(tb, key)	murmurhash64((uint64) key)
@@ -62,7 +62,7 @@ typedef struct astreamer_waldump
 } astreamer_waldump;
 
 static int	read_archive_file(XLogDumpPrivate *privateInfo, Size count);
-static ArchivedWALEntry *get_archive_wal_entry(XLogSegNo segno,
+static ArchivedWALFile *get_archive_wal_entry(XLogSegNo segno,
 											   XLogDumpPrivate *privateInfo,
 											   int WalSegSz);
 
@@ -130,7 +130,7 @@ init_archive_reader(XLogDumpPrivate *privateInfo, const char *waldir,
 {
 	int			fd;
 	astreamer  *streamer;
-	ArchivedWALEntry *entry = NULL;
+	ArchivedWALFile *entry = NULL;
 	XLogLongPageHeader longhdr;
 
 	/* Open tar archive and store its file descriptor */
@@ -169,7 +169,7 @@ init_archive_reader(XLogDumpPrivate *privateInfo, const char *waldir,
 			pg_fatal("could not find WAL in \"%s\" archive",
 					 privateInfo->archive_name);
 
-		entry = privateInfo->cur_wal;
+		entry = privateInfo->cur_file;
 	}
 
 	/* Set WalSegSz if WAL data is successfully read */
@@ -233,7 +233,7 @@ read_archive_wal_page(XLogDumpPrivate *privateInfo, XLogRecPtr targetPagePtr,
 	Size		nbytes = count;
 	XLogRecPtr	recptr = targetPagePtr;
 	XLogSegNo	segno;
-	ArchivedWALEntry *entry;
+	ArchivedWALFile *entry;
 
 	XLByteToSeg(targetPagePtr, segno, WalSegSz);
 	entry = get_archive_wal_entry(segno, privateInfo, WalSegSz);
@@ -310,7 +310,7 @@ read_archive_wal_page(XLogDumpPrivate *privateInfo, XLogRecPtr targetPagePtr,
 			 * being read by the archive streamer or if reading of the
 			 * archived file has finished.
 			 */
-			if (privateInfo->cur_wal != entry ||
+			if (privateInfo->cur_file != entry ||
 				read_archive_file(privateInfo, READ_CHUNK_SIZE) == 0)
 			{
 				char		fname[MAXFNAMELEN];
@@ -375,11 +375,11 @@ read_archive_file(XLogDumpPrivate *privateInfo, Size count)
  * it invokes the routine to read the archived file, which then populates the
  * entry in the hash table.
  */
-static ArchivedWALEntry *
+static ArchivedWALFile *
 get_archive_wal_entry(XLogSegNo segno, XLogDumpPrivate *privateInfo,
 					  int WalSegSz)
 {
-	ArchivedWALEntry *entry = NULL;
+	ArchivedWALFile *entry = NULL;
 	char		fname[MAXFNAMELEN];
 
 	/* Search hash table */
@@ -391,7 +391,7 @@ get_archive_wal_entry(XLogSegNo segno, XLogDumpPrivate *privateInfo,
 	/* Needed WAL yet to be decoded from archive, do the same */
 	while (1)
 	{
-		entry = privateInfo->cur_wal;
+		entry = privateInfo->cur_file;
 
 		/* Fetch more data */
 		if (read_archive_file(privateInfo, READ_CHUNK_SIZE) == 0)
@@ -416,7 +416,7 @@ get_archive_wal_entry(XLogSegNo segno, XLogDumpPrivate *privateInfo,
 			privateInfo->startSegNo > entry->segno ||
 			privateInfo->endSegNo < entry->segno)
 		{
-			privateInfo->cur_wal = NULL;
+			privateInfo->cur_file = NULL;
 			continue;
 		}
 
@@ -481,7 +481,7 @@ astreamer_waldump_content(astreamer *streamer, astreamer_member *member,
 			{
 				XLogSegNo	segno;
 				TimeLineID	timeline;
-				ArchivedWALEntry *entry;
+				ArchivedWALFile *entry;
 				bool		found;
 
 				pg_log_debug("reading \"%s\"", member->pathname);
@@ -507,20 +507,20 @@ astreamer_waldump_content(astreamer *streamer, astreamer_member *member,
 				entry->timeline = timeline;
 				entry->total_read = 0;
 
-				privateInfo->cur_wal = entry;
+				privateInfo->cur_file = entry;
 			}
 			break;
 
 		case ASTREAMER_MEMBER_CONTENTS:
-			if (privateInfo->cur_wal)
+			if (privateInfo->cur_file)
 			{
-				appendBinaryStringInfo(&privateInfo->cur_wal->buf, data, len);
-				privateInfo->cur_wal->total_read += len;
+				appendBinaryStringInfo(&privateInfo->cur_file->buf, data, len);
+				privateInfo->cur_file->total_read += len;
 			}
 			break;
 
 		case ASTREAMER_MEMBER_TRAILER:
-			privateInfo->cur_wal = NULL;
+			privateInfo->cur_file = NULL;
 			break;
 
 		case ASTREAMER_ARCHIVE_TRAILER:
@@ -572,18 +572,14 @@ member_is_wal_file(astreamer_waldump *mystreamer, astreamer_member *member,
 	if (pathlen < XLOG_FNAME_LEN)
 		return false;
 
+	/* WAL files from the top-level or pg_wal directory will be decoded */
+	if (pathlen > XLOG_FNAME_LEN &&
+		strncpy(member->pathname, XLOGDIR, strlen(XLOGDIR)) != 0)
+		return false;
+
 	/* WAL file could be with full path */
 	fname = member->pathname + (pathlen - XLOG_FNAME_LEN);
 	if (!IsXLogFileName(fname))
-		return false;
-
-	/*
-	 * XXX: On some systems (e.g., OpenBSD), the tar utility includes
-	 * PaxHeaders when creating an archive. These are special entries that
-	 * store extended metadata for the file entry immediately following them,
-	 * and they share the exact same name as that file.
-	 */
-	if (strstr(member->pathname, "PaxHeaders."))
 		return false;
 
 	/* Parse position from file */
