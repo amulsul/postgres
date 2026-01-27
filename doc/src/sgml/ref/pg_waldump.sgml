@@ -149,8 +149,12 @@ PostgreSQL documentation
         of <envar>PGDATA</envar>.
        </para>
        <para>
-        If a tar archive is provided, its WAL segment files must be in
-        sequential order; otherwise, an error will be reported.
+        If a tar archive is provided and its WAL segment files are not in
+        sequential order, those files will be written to a temporary directory
+        named starting with <filename>waldump_tmp</filename>. This directory will be
+        created inside the directory specified by the <envar>TMPDIR</envar>
+        environment variable if it is set; otherwise, it will be created within
+        the same directory as the tar archive.
        </para>
       </listitem>
      </varlistentry>
