@@ -7,6 +7,7 @@ use Cwd;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+use List::Util qw(shuffle);
 
 my $tar = $ENV{TAR};
 
@@ -312,7 +313,7 @@ sub generate_archive
 	}
 	closedir $dh;
 
-	@files = sort @files;
+	@files = shuffle @files;
 
 	# move into the WAL directory before archiving files
 	my $cwd = getcwd;

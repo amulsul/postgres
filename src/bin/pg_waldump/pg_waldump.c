@@ -478,10 +478,14 @@ TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 		return -1;
 
 	/*
-	 * If the target page is in a different segment, free the buffer space
-	 * occupied by the previous segment data. Since pg_waldump never requests
-	 * the same WAL bytes twice, moving to a new segment implies the previous
-	 * buffer's data and that segment will not be needed again.
+	 * If the target page is in a different segment, free the buffer and/or
+	 * temporary file disk space occupied by the previous segment's data.
+	 * Since pg_waldump never requests the same WAL bytes twice, moving to a
+	 * new segment implies the previous buffer's data and that segment will
+	 * not be needed again.
+	 *
+	 * Afterward, check for the next required WAL segment's physical existence
+	 * in the temporary directory first before invoking the archive streamer.
 	 */
 	curSegNo = state->seg.ws_segno;
 	if (!XLByteInSeg(targetPagePtr, curSegNo, WalSegSz))
@@ -497,6 +501,13 @@ TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 		state->seg.ws_tli = private->timeline;
 		state->seg.ws_segno = nextSegNo;
 
+		/* Close the WAL segment file if it is currently open */
+		if (state->seg.ws_file >= 0)
+		{
+			close(state->seg.ws_file);
+			state->seg.ws_file = -1;
+		}
+
 		/*
 		 * If in pre-reading mode (prior to actual decoding), do not delete
 		 * any entries that might be requested again once the decoding loop
@@ -508,9 +519,20 @@ TarWALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 			XLogFileName(fname, state->seg.ws_tli, curSegNo, WalSegSz);
 			free_archive_wal_entry(fname, private);
 		}
+
+		/*
+		 * If the next segment exists, open it and continue reading from there
+		 */
+		XLogFileName(fname, state->seg.ws_tli, nextSegNo, WalSegSz);
+		state->seg.ws_file = open_file_in_directory(TmpWalSegDir, fname);
 	}
 
-	/* Read the WAL page from the archive streamer */
+	/* Continue reading from the open WAL segment, if any */
+	if (state->seg.ws_file >= 0)
+		return WALDumpReadPage(state, targetPagePtr, count, targetPtr,
+							   readBuff);
+
+	/* Otherwise, read the WAL page from the archive streamer */
 	return read_archive_wal_page(private, targetPagePtr, count, readBuff,
 								 WalSegSz);
 }

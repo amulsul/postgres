@@ -18,6 +18,9 @@
 struct ArchivedWALFile;
 struct ArchivedWAL_hash;
 
+/* Temporary directory */
+extern char *TmpWalSegDir;
+
 /* Contains the necessary information to drive WAL decoding */
 typedef struct XLogDumpPrivate
 {
