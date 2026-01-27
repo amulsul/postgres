@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "access/xlog_internal.h"
+#include "common/file_perm.h"
 #include "common/hashfn.h"
 #include "common/logging.h"
 #include "fe_utils/simple_list.h"
@@ -26,6 +27,9 @@
  * How many bytes should we try to read from a file at once?
  */
 #define READ_CHUNK_SIZE				(128 * 1024)
+
+/* Temporary exported WAL file directory */
+char	   *TmpWalSegDir = NULL;
 
 /*
  * Hash entry representing a WAL segment retrieved from the archive.
@@ -51,6 +55,7 @@ typedef struct ArchivedWALFile
 	const char *fname;			/* hash key: WAL segment name */
 
 	StringInfo	buf;
+	bool		tmpfile_exists; /* spill file exists? */
 
 	int			total_read;		/* total size of a WAL read from archive */
 } ArchivedWALFile;
@@ -78,6 +83,11 @@ static ArchivedWALFile *get_archive_wal_entry(const char *fname,
 											  XLogDumpPrivate *privateInfo,
 											  int WalSegSz);
 static int	read_archive_file(XLogDumpPrivate *privateInfo, Size count);
+static void setup_tmpwal_dir(const char *waldir);
+static void cleanup_tmpwal_dir_atexit(void);
+
+static FILE *prepare_tmp_write(const char *fname);
+static void perform_tmp_write(const char *fname, StringInfo buf, FILE *file);
 
 static astreamer *astreamer_waldump_new(XLogDumpPrivate *privateInfo);
 static void astreamer_waldump_content(astreamer *streamer,
@@ -134,7 +144,9 @@ is_archive_file(const char *fname, pg_compress_algorithm *compression)
 /*
  * Initializes the tar archive reader, creates a hash table for WAL entries,
  * checks for existing valid WAL segments in the archive file and retrieves the
- * segment size, and sets up filters for relevant entries.
+ * segment size, and sets up filters for relevant entries. It also configures a
+ * temporary directory for out-of-order WAL data and registers an exit callback
+ * to clean up temporary files.
  */
 void
 init_archive_reader(XLogDumpPrivate *privateInfo, const char *waldir,
@@ -210,6 +222,13 @@ init_archive_reader(XLogDumpPrivate *privateInfo, const char *waldir,
 		privateInfo->endSegNo = UINT64_MAX;
 	else
 		XLByteToSeg(privateInfo->endptr, privateInfo->endSegNo, *WalSegSz);
+
+	/*
+	 * Setup temporary directory to store WAL segments and set up an exit
+	 * callback to remove it upon completion.
+	 */
+	setup_tmpwal_dir(waldir);
+	atexit(cleanup_tmpwal_dir_atexit);
 }
 
 /*
@@ -358,6 +377,17 @@ free_archive_wal_entry(const char *fname, XLogDumpPrivate *privateInfo)
 	destroyStringInfo(entry->buf);
 	entry->buf = NULL;
 
+	/* Remove temporary file if any */
+	if (entry->tmpfile_exists)
+	{
+		char		fpath[MAXPGPATH];
+
+		snprintf(fpath, MAXPGPATH, "%s/%s", TmpWalSegDir, fname);
+
+		if (unlink(fpath) == 0)
+			pg_log_debug("removed file \"%s\"", fpath);
+	}
+
 	/* Set cur_file to NULL if it matches the entry being ignored */
 	if (privateInfo->cur_file == entry)
 		privateInfo->cur_file = NULL;
@@ -369,6 +399,9 @@ free_archive_wal_entry(const char *fname, XLogDumpPrivate *privateInfo)
  * Returns the archived WAL entry from the hash table if it exists.  Otherwise,
  * it invokes the routine to read the archived file, which then populates the
  * entry in the hash table if that WAL exists in the archive.
+ * If the archive streamer happens to be reading a
+ * WAL from archive file that is not currently needed, that WAL data is written
+ * to a temporary file.
  */
 static ArchivedWALFile *
 get_archive_wal_entry(const char *fname, XLogDumpPrivate *privateInfo,
@@ -377,6 +410,7 @@ get_archive_wal_entry(const char *fname, XLogDumpPrivate *privateInfo,
 	ArchivedWALFile *entry = NULL;
 	XLogSegNo	segno;
 	TimeLineID	timeline;
+	FILE	   *write_fp = NULL;
 
 	/* Search hash table */
 	entry = ArchivedWAL_lookup(privateInfo->archive_wal_htab, fname);
@@ -393,18 +427,28 @@ get_archive_wal_entry(const char *fname, XLogDumpPrivate *privateInfo,
 		XLogSegNo	curSegNo;
 		TimeLineID	curSegTimeline;
 
+		/*
+		 * The WAL file entry currently being processed may change during
+		 * archive streamer execution. Therefore, maintain a local variable to
+		 * reference the previous entry, ensuring that any remaining data in
+		 * its buffer is successfully flushed to the temporary file before
+		 * switching to the next WAL entry.
+		 */
+		entry = privateInfo->cur_file;
+
 		/* Fetch more data */
-		if (read_archive_file(privateInfo, READ_CHUNK_SIZE) == 0)
-			break;				/* archive file ended */
+		if (entry == NULL || entry->buf->len == 0)
+		{
+			if (read_archive_file(privateInfo, READ_CHUNK_SIZE) == 0)
+				break;			/* archive file ended */
+		}
 
 		/*
 		 * Either, here for the first time, or the archived streamer is
 		 * reading a non-WAL file or an irrelevant WAL file.
 		 */
-		if (privateInfo->cur_file == NULL)
+		if (entry == NULL)
 			continue;
-
-		entry = privateInfo->cur_file;
 
 		/*
 		 * Ignore if the timeline is different or the current segment is not
@@ -413,8 +457,7 @@ get_archive_wal_entry(const char *fname, XLogDumpPrivate *privateInfo,
 		XLogFromFileName(entry->fname, &curSegTimeline, &curSegNo, WalSegSz);
 		if (privateInfo->timeline != curSegTimeline ||
 			privateInfo->startSegNo > curSegNo ||
-			privateInfo->endSegNo < curSegNo ||
-			segno > curSegNo)
+			privateInfo->endSegNo < curSegNo)
 		{
 			free_archive_wal_entry(entry->fname, privateInfo);
 			continue;
@@ -424,11 +467,32 @@ get_archive_wal_entry(const char *fname, XLogDumpPrivate *privateInfo,
 		if (curSegNo == segno)
 			return entry;
 
-		/* WAL segments must be archived in order */
-		pg_log_error("WAL files are not archived in sequential order");
-		pg_log_error_detail("Expecting segment number " UINT64_FORMAT " but found " UINT64_FORMAT ".",
-							segno, curSegNo);
-		exit(1);
+		/*
+		 * Archive streamer is currently reading a file that isn't the one
+		 * asked for, but it's required in the future. It should be written to
+		 * a temporary location for retrieval when needed.
+		 */
+
+		/* Create a temporary file if one does not already exist */
+		if (!entry->tmpfile_exists)
+		{
+			write_fp = prepare_tmp_write(entry->fname);
+			entry->tmpfile_exists = true;
+		}
+
+		/* Flush data from the buffer to the file */
+		perform_tmp_write(entry->fname, entry->buf, write_fp);
+		resetStringInfo(entry->buf);
+
+		/*
+		 * The change in the current segment entry indicates that the reading
+		 * of this file has ended.
+		 */
+		if (entry != privateInfo->cur_file && write_fp != NULL)
+		{
+			fclose(write_fp);
+			write_fp = NULL;
+		}
 	}
 
 	/* Requested WAL segment not found */
@@ -465,7 +529,88 @@ read_archive_file(XLogDumpPrivate *privateInfo, Size count)
 }
 
 /*
- * Create an astreamer that can read WAL from a tar file.
+ * Set up a temporary directory to temporarily store WAL segments.
+ */
+static void
+setup_tmpwal_dir(const char *waldir)
+{
+	char	   *template;
+
+	/*
+	 * Use the directory specified by the TMPDIR environment variable. If it's
+	 * not set, use the provided WAL directory to extract WAL file
+	 * temporarily.
+	 */
+	template = psprintf("%s/waldump_tmp-XXXXXX",
+						getenv("TMPDIR") ? getenv("TMPDIR") : waldir);
+	TmpWalSegDir = mkdtemp(template);
+
+	if (TmpWalSegDir == NULL)
+		pg_fatal("could not create directory \"%s\": %m", template);
+
+	canonicalize_path(TmpWalSegDir);
+
+	pg_log_debug("created directory \"%s\"", TmpWalSegDir);
+}
+
+/*
+ * Remove temporary directory at exit, if any.
+ */
+static void
+cleanup_tmpwal_dir_atexit(void)
+{
+	rmtree(TmpWalSegDir, true);
+}
+
+/*
+ * Create an empty placeholder file and return its handle.
+ */
+static FILE *
+prepare_tmp_write(const char *fname)
+{
+	char		fpath[MAXPGPATH];
+	FILE	   *file;
+
+	snprintf(fpath, MAXPGPATH, "%s/%s", TmpWalSegDir, fname);
+
+	/* Create an empty placeholder */
+	file = fopen(fpath, PG_BINARY_W);
+	if (file == NULL)
+		pg_fatal("could not create file \"%s\": %m", fpath);
+
+#ifndef WIN32
+	if (chmod(fpath, pg_file_create_mode))
+		pg_fatal("could not set permissions on file \"%s\": %m",
+				 fpath);
+#endif
+
+	pg_log_debug("temporarily exporting file \"%s\"", fpath);
+
+	return file;
+}
+
+/*
+ * Write buffer data to the given file handle.
+ */
+static void
+perform_tmp_write(const char *fname, StringInfo buf, FILE *file)
+{
+	Assert(file);
+
+	errno = 0;
+	if (buf->len > 0 && fwrite(buf->data, buf->len, 1, file) != 1)
+	{
+		/*
+		 * If write didn't set errno, assume problem is no disk space
+		 */
+		if (errno == 0)
+			errno = ENOSPC;
+		pg_fatal("could not write to file \"%s\": %m", fname);
+	}
+}
+
+/*
+ * Create an astreamer that can read WAL from tar file.
  */
 static astreamer *
 astreamer_waldump_new(XLogDumpPrivate *privateInfo)
