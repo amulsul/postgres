@@ -314,17 +314,23 @@ read_archive_wal_page(XLogDumpPrivate *privateInfo, XLogRecPtr targetPagePtr,
 			 * fully consumed WAL data preceding the current page can be
 			 * safely discarded.
 			 */
-			resetStringInfo(entry->buf);
-
-			/*
-			 * Push back the partial page data for the current page to the
-			 * buffer, ensuring it remains full page available for re-reading
-			 * if requested.
-			 */
-			if (p > readBuff)
+			//
+			//TODO : explain it?
+			//
+			if (entry->buf->len > BLCKSZ * 2)
 			{
-				Assert((count - nbytes) > 0);
-				appendBinaryStringInfo(entry->buf, readBuff, count - nbytes);
+				resetStringInfo(entry->buf);
+
+				/*
+				 * Push back the partial page data for the current page to the
+				 * buffer, ensuring it remains full page available for re-reading
+				 * if requested.
+				 */
+				if (p > readBuff)
+				{
+					Assert((count - nbytes) > 0);
+					appendBinaryStringInfo(entry->buf, readBuff, count - nbytes);
+				}
 			}
 
 			/*
