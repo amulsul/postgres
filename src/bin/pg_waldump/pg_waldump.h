@@ -17,6 +17,7 @@
 typedef struct XLogDumpPrivate
 {
 	TimeLineID	timeline;
+	int			segsize;
 	XLogRecPtr	startptr;
 	XLogRecPtr	endptr;
 	bool		endptr_reached;

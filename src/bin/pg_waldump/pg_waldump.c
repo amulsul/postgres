@@ -811,7 +811,6 @@ main(int argc, char **argv)
 	XLogRecPtr	first_record;
 	char	   *waldir = NULL;
 	char	   *errormsg;
-	int			WalSegSz;
 
 	static struct option long_options[] = {
 		{"bkp-details", no_argument, NULL, 'b'},
@@ -865,6 +864,7 @@ main(int argc, char **argv)
 	memset(&stats, 0, sizeof(XLogStats));
 
 	private.timeline = 1;
+	private.segsize = 0;
 	private.startptr = InvalidXLogRecPtr;
 	private.endptr = InvalidXLogRecPtr;
 	private.endptr_reached = false;
@@ -1138,18 +1138,18 @@ main(int argc, char **argv)
 				pg_fatal("could not open directory \"%s\": %m", waldir);
 		}
 
-		waldir = identify_target_directory(waldir, fname, &WalSegSz);
+		waldir = identify_target_directory(waldir, fname, &private.segsize);
 		fd = open_file_in_directory(waldir, fname);
 		if (fd < 0)
 			pg_fatal("could not open file \"%s\"", fname);
 		close(fd);
 
 		/* parse position from file */
-		XLogFromFileName(fname, &private.timeline, &segno, WalSegSz);
+		XLogFromFileName(fname, &private.timeline, &segno, private.segsize);
 
 		if (!XLogRecPtrIsValid(private.startptr))
-			XLogSegNoOffsetToRecPtr(segno, 0, WalSegSz, private.startptr);
-		else if (!XLByteInSeg(private.startptr, segno, WalSegSz))
+			XLogSegNoOffsetToRecPtr(segno, 0, private.segsize, private.startptr);
+		else if (!XLByteInSeg(private.startptr, segno, private.segsize))
 		{
 			pg_log_error("start WAL location %X/%08X is not inside file \"%s\"",
 						 LSN_FORMAT_ARGS(private.startptr),
@@ -1159,7 +1159,7 @@ main(int argc, char **argv)
 
 		/* no second file specified, set end position */
 		if (!(optind + 1 < argc) && !XLogRecPtrIsValid(private.endptr))
-			XLogSegNoOffsetToRecPtr(segno + 1, 0, WalSegSz, private.endptr);
+			XLogSegNoOffsetToRecPtr(segno + 1, 0, private.segsize, private.endptr);
 
 		/* parse ENDSEG if passed */
 		if (optind + 1 < argc)
@@ -1175,14 +1175,14 @@ main(int argc, char **argv)
 			close(fd);
 
 			/* parse position from file */
-			XLogFromFileName(fname, &private.timeline, &endsegno, WalSegSz);
+			XLogFromFileName(fname, &private.timeline, &endsegno, private.segsize);
 
 			if (endsegno < segno)
 				pg_fatal("ENDSEG %s is before STARTSEG %s",
 						 argv[optind + 1], argv[optind]);
 
 			if (!XLogRecPtrIsValid(private.endptr))
-				XLogSegNoOffsetToRecPtr(endsegno + 1, 0, WalSegSz,
+				XLogSegNoOffsetToRecPtr(endsegno + 1, 0, private.segsize,
 										private.endptr);
 
 			/* set segno to endsegno for check of --end */
@@ -1190,8 +1190,8 @@ main(int argc, char **argv)
 		}
 
 
-		if (!XLByteInSeg(private.endptr, segno, WalSegSz) &&
-			private.endptr != (segno + 1) * WalSegSz)
+		if (!XLByteInSeg(private.endptr, segno, private.segsize) &&
+			private.endptr != (segno + 1) * private.segsize)
 		{
 			pg_log_error("end WAL location %X/%08X is not inside file \"%s\"",
 						 LSN_FORMAT_ARGS(private.endptr),
@@ -1200,7 +1200,7 @@ main(int argc, char **argv)
 		}
 	}
 	else
-		waldir = identify_target_directory(waldir, NULL, &WalSegSz);
+		waldir = identify_target_directory(waldir, NULL, &private.segsize);
 
 	/* we don't know what to print */
 	if (!XLogRecPtrIsValid(private.startptr))
@@ -1213,7 +1213,7 @@ main(int argc, char **argv)
 
 	/* we have everything we need, start reading */
 	xlogreader_state =
-		XLogReaderAllocate(WalSegSz, waldir,
+		XLogReaderAllocate(private.segsize, waldir,
 						   XL_ROUTINE(.page_read = WALDumpReadPage,
 									  .segment_open = WALDumpOpenSegment,
 									  .segment_close = WALDumpCloseSegment),
@@ -1234,7 +1234,7 @@ main(int argc, char **argv)
 	 * a segment (e.g. we were used in file mode).
 	 */
 	if (first_record != private.startptr &&
-		XLogSegmentOffset(private.startptr, WalSegSz) != 0)
+		XLogSegmentOffset(private.startptr, private.segsize) != 0)
 		pg_log_info(ngettext("first record is after %X/%08X, at %X/%08X, skipping over %u byte",
 							 "first record is after %X/%08X, at %X/%08X, skipping over %u bytes",
 							 (first_record - private.startptr)),
