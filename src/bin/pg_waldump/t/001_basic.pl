@@ -3,9 +3,12 @@
 
 use strict;
 use warnings FATAL => 'all';
+use Cwd;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+
+my $tar = $ENV{TAR};
 
 program_help_ok('pg_waldump');
 program_version_ok('pg_waldump');
@@ -162,6 +165,42 @@ CREATE TABLESPACE ts1 LOCATION '$tblspc_path';
 DROP TABLESPACE ts1;
 });
 
+# Test: Decode a continuation record (contrecord) that spans multiple WAL
+# segments.
+#
+# Now consume all remaining room in the current WAL segment, leaving
+# space enough only for the start of a largish record.
+$node->safe_psql(
+	'postgres', q{
+DO $$
+DECLARE
+    wal_segsize int := setting::int FROM pg_settings WHERE name = 'wal_segment_size';
+    remain int;
+    iters  int := 0;
+BEGIN
+    LOOP
+        INSERT into t1(b)
+        select repeat(encode(sha256(g::text::bytea), 'hex'), (random() * 15 + 1)::int)
+        from generate_series(1, 10) g;
+
+        remain := wal_segsize - (pg_current_wal_insert_lsn() - '0/0') % wal_segsize;
+        IF remain < 2 * setting::int from pg_settings where name = 'block_size' THEN
+            RAISE log 'exiting after % iterations, % bytes to end of WAL segment', iters, remain;
+            EXIT;
+        END IF;
+        iters := iters + 1;
+    END LOOP;
+END
+$$;
+});
+
+my $contrecord_lsn = $node->safe_psql('postgres',
+	'SELECT pg_current_wal_insert_lsn()');
+# Generate contrecord record
+$node->safe_psql('postgres',
+	qq{SELECT pg_logical_emit_message(true, 'test 026', repeat('xyzxz', 123456))}
+);
+
 my ($end_lsn, $end_walfile) = split /\|/,
   $node->safe_psql('postgres',
 	q{SELECT pg_current_wal_insert_lsn(), pg_walfile_name(pg_current_wal_insert_lsn())}
@@ -259,11 +298,50 @@ sub test_pg_waldump
 	return @lines;
 }
 
-my @lines;
+# Create a tar archive, sorting the file order
+sub generate_archive
+{
+	my ($archive, $directory, $compression_flags) = @_;
+
+	my @files;
+	opendir my $dh, $directory or die "opendir: $!";
+	while (my $entry = readdir $dh) {
+		# Skip '.' and '..'
+		next if $entry eq '.' || $entry eq '..';
+		push @files, $entry;
+	}
+	closedir $dh;
+
+	@files = sort @files;
+
+	# move into the WAL directory before archiving files
+	my $cwd = getcwd;
+	chdir($directory) || die "chdir: $!";
+	command_ok([$tar, $compression_flags, $archive, @files]);
+	chdir($cwd) || die "chdir: $!";
+}
+
+my $tmp_dir = PostgreSQL::Test::Utils::tempdir_short();
 
 my @scenarios = (
 	{
-		'path' => $node->data_dir
+		'path' => $node->data_dir,
+		'is_archive' => 0,
+		'enabled' => 1
+	},
+	{
+		'path' => "$tmp_dir/pg_wal.tar",
+		'compression_method' => 'none',
+		'compression_flags' => '-cf',
+		'is_archive' => 1,
+		'enabled' => 1
+	},
+	{
+		'path' => "$tmp_dir/pg_wal.tar.gz",
+		'compression_method' => 'gzip',
+		'compression_flags' => '-czf',
+		'is_archive' => 1,
+		'enabled' => check_pg_config("#define HAVE_LIBZ 1")
 	});
 
 for my $scenario (@scenarios)
@@ -272,6 +350,19 @@ for my $scenario (@scenarios)
 
 	SKIP:
 	{
+		skip "tar command is not available", 56
+		  if !defined $tar && $scenario->{'is_archive'};
+		skip "$scenario->{'compression_method'} compression not supported by this build", 56
+		  if !$scenario->{'enabled'} && $scenario->{'is_archive'};
+
+		  # create pg_wal archive
+		  if ($scenario->{'is_archive'})
+		  {
+			  generate_archive($path,
+				  $node->data_dir . '/pg_wal',
+				  $scenario->{'compression_flags'});
+		  }
+
 		command_fails_like(
 			[ 'pg_waldump', '--path' => $path ],
 			qr/error: no start WAL location given/,
@@ -305,8 +396,13 @@ for my $scenario (@scenarios)
 
 		test_pg_waldump_skip_bytes($path, $start_lsn, $end_lsn);
 
-		@lines = test_pg_waldump($path, $start_lsn, $end_lsn);
+		my @lines = test_pg_waldump($path, $start_lsn, $end_lsn);
 		is(grep(!/^rmgr: \w/, @lines), 0, 'all output lines are rmgr lines');
+
+		@lines = test_pg_waldump($path, $contrecord_lsn, $end_lsn);
+		is(grep(!/^rmgr: \w/, @lines), 0, 'all output lines are rmgr lines');
+
+		test_pg_waldump_skip_bytes($path, $contrecord_lsn, $end_lsn);
 
 		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--limit' => 6);
 		is(@lines, 6, 'limit option observed');
@@ -337,6 +433,9 @@ for my $scenario (@scenarios)
 			'--relation' => "$default_ts_oid/$postgres_db_oid/$rel_i1a_oid",
 			'--block' => 1);
 		is(grep(!/\bblk 1\b/, @lines), 0, 'only lines for selected block');
+
+		# Cleanup.
+		unlink $path if $scenario->{'is_archive'};
 	}
 }
 
