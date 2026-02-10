@@ -3,9 +3,12 @@
 
 use strict;
 use warnings FATAL => 'all';
+use Cwd;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
+
+my $tar = $ENV{TAR};
 
 program_help_ok('pg_waldump');
 program_version_ok('pg_waldump');
@@ -235,7 +238,7 @@ command_like(
 sub test_pg_waldump
 {
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
-	my @opts = @_;
+	my ($path, @opts) = @_;
 
 	my ($stdout, $stderr);
 
@@ -243,6 +246,7 @@ sub test_pg_waldump
 		'pg_waldump',
 		'--start' => $start_lsn,
 		'--end' => $end_lsn,
+		'--path' => $path,
 		@opts
 	  ],
 	  '>' => \$stdout,
@@ -254,11 +258,50 @@ sub test_pg_waldump
 	return @lines;
 }
 
-my @lines;
+# Create a tar archive, sorting the file order
+sub generate_archive
+{
+	my ($archive, $directory, $compression_flags) = @_;
+
+	my @files;
+	opendir my $dh, $directory or die "opendir: $!";
+	while (my $entry = readdir $dh) {
+		# Skip '.' and '..'
+		next if $entry eq '.' || $entry eq '..';
+		push @files, $entry;
+	}
+	closedir $dh;
+
+	@files = sort @files;
+
+	# move into the WAL directory before archiving files
+	my $cwd = getcwd;
+	chdir($directory) || die "chdir: $!";
+	command_ok([$tar, $compression_flags, $archive, @files]);
+	chdir($cwd) || die "chdir: $!";
+}
+
+my $tmp_dir = PostgreSQL::Test::Utils::tempdir_short();
 
 my @scenarios = (
 	{
-		'path' => $node->data_dir
+		'path' => $node->data_dir,
+		'is_archive' => 0,
+		'enabled' => 1
+	},
+	{
+		'path' => "$tmp_dir/pg_wal.tar",
+		'compression_method' => 'none',
+		'compression_flags' => '-cf',
+		'is_archive' => 1,
+		'enabled' => 1
+	},
+	{
+		'path' => "$tmp_dir/pg_wal.tar.gz",
+		'compression_method' => 'gzip',
+		'compression_flags' => '-czf',
+		'is_archive' => 1,
+		'enabled' => check_pg_config("#define HAVE_LIBZ 1")
 	});
 
 for my $scenario (@scenarios)
@@ -267,6 +310,19 @@ for my $scenario (@scenarios)
 
 	SKIP:
 	{
+		skip "tar command is not available", 3
+		  if !defined $tar;
+		skip "$scenario->{'compression_method'} compression not supported by this build", 3
+		  if !$scenario->{'enabled'} && $scenario->{'is_archive'};
+
+		  # create pg_wal archive
+		  if ($scenario->{'is_archive'})
+		  {
+			  generate_archive($path,
+				  $node->data_dir . '/pg_wal',
+				  $scenario->{'compression_flags'});
+		  }
+
 		command_fails_like(
 			[ 'pg_waldump', '--path' => $path ],
 			qr/error: no start WAL location given/,
@@ -298,38 +354,41 @@ for my $scenario (@scenarios)
 			qr/error: error in WAL record at/,
 			'errors are shown with --quiet');
 
-		@lines = test_pg_waldump('--path' => $path);
+		my @lines = test_pg_waldump($path);
 		is(grep(!/^rmgr: \w/, @lines), 0, 'all output lines are rmgr lines');
 
-		@lines = test_pg_waldump('--path' => $path, '--limit' => 6);
+		@lines = test_pg_waldump($path, '--limit' => 6);
 		is(@lines, 6, 'limit option observed');
 
-		@lines = test_pg_waldump('--path' => $path, '--fullpage');
+		@lines = test_pg_waldump($path, '--fullpage');
 		is(grep(!/^rmgr:.*\bFPW\b/, @lines), 0, 'all output lines are FPW');
 
-		@lines = test_pg_waldump('--path' => $path, '--stats');
+		@lines = test_pg_waldump($path, '--stats');
 		like($lines[0], qr/WAL statistics/, "statistics on stdout");
 		is(grep(/^rmgr:/, @lines), 0, 'no rmgr lines output');
 
-		@lines = test_pg_waldump('--path' => $path, '--stats=record');
+		@lines = test_pg_waldump($path, '--stats=record');
 		like($lines[0], qr/WAL statistics/, "statistics on stdout");
 		is(grep(/^rmgr:/, @lines), 0, 'no rmgr lines output');
 
-		@lines = test_pg_waldump('--path' => $path, '--rmgr' => 'Btree');
+		@lines = test_pg_waldump($path, '--rmgr' => 'Btree');
 		is(grep(!/^rmgr: Btree/, @lines), 0, 'only Btree lines');
 
-		@lines = test_pg_waldump('--path' => $path, '--fork' => 'init');
+		@lines = test_pg_waldump($path, '--fork' => 'init');
 		is(grep(!/fork init/, @lines), 0, 'only init fork lines');
 
-		@lines = test_pg_waldump('--path' => $path,
+		@lines = test_pg_waldump($path,
 			'--relation' => "$default_ts_oid/$postgres_db_oid/$rel_t1_oid");
 		is(grep(!/rel $default_ts_oid\/$postgres_db_oid\/$rel_t1_oid/, @lines),
 			0, 'only lines for selected relation');
 
-		@lines = test_pg_waldump('--path' => $path,
+		@lines = test_pg_waldump($path,
 			'--relation' => "$default_ts_oid/$postgres_db_oid/$rel_i1a_oid",
 			'--block' => 1);
 		is(grep(!/\bblk 1\b/, @lines), 0, 'only lines for selected block');
+
+		# Cleanup.
+		unlink $path if $scenario->{'is_archive'};
 	}
 }
 
