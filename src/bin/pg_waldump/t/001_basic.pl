@@ -198,28 +198,6 @@ command_like(
 	],
 	qr/./,
 	'runs with start and end segment specified');
-command_fails_like(
-	[ 'pg_waldump', '--path' => $node->data_dir ],
-	qr/error: no start WAL location given/,
-	'path option requires start location');
-command_like(
-	[
-		'pg_waldump',
-		'--path' => $node->data_dir,
-		'--start' => $start_lsn,
-		'--end' => $end_lsn,
-	],
-	qr/./,
-	'runs with path option and start and end locations');
-command_fails_like(
-	[
-		'pg_waldump',
-		'--path' => $node->data_dir,
-		'--start' => $start_lsn,
-	],
-	qr/error: error in WAL record at/,
-	'falling off the end of the WAL results in an error');
-
 command_like(
 	[
 		'pg_waldump', '--quiet',
@@ -227,22 +205,16 @@ command_like(
 	],
 	qr/^$/,
 	'no output with --quiet option');
-command_fails_like(
-	[
-		'pg_waldump', '--quiet',
-		'--path' => $node->data_dir,
-		'--start' => $start_lsn
-	],
-	qr/error: error in WAL record at/,
-	'errors are shown with --quiet');
-
 
 # Test for: Display a message that we're skipping data if `from`
 # wasn't a pointer to the start of a record.
+sub test_pg_waldump_skip_bytes
 {
+	my ($path, $startlsn, $endlsn) = @_;
+
 	# Construct a new LSN that is one byte past the original
 	# start_lsn.
-	my ($part1, $part2) = split qr{/}, $start_lsn;
+	my ($part1, $part2) = split qr{/}, $startlsn;
 	my $lsn2 = hex $part2;
 	$lsn2++;
 	my $new_start = sprintf("%s/%X", $part1, $lsn2);
@@ -252,7 +224,8 @@ command_fails_like(
 	my $result = IPC::Run::run [
 		'pg_waldump',
 		'--start' => $new_start,
-		$node->data_dir . '/pg_wal/' . $start_walfile
+		'--end' => $endlsn,
+		'--path' => $path,
 	  ],
 	  '>' => \$stdout,
 	  '2>' => \$stderr;
@@ -266,15 +239,15 @@ command_fails_like(
 sub test_pg_waldump
 {
 	local $Test::Builder::Level = $Test::Builder::Level + 1;
-	my @opts = @_;
+	my ($path, $startlsn, $endlsn, @opts) = @_;
 
 	my ($stdout, $stderr);
 
 	my $result = IPC::Run::run [
 		'pg_waldump',
-		'--path' => $node->data_dir,
-		'--start' => $start_lsn,
-		'--end' => $end_lsn,
+		'--start' => $startlsn,
+		'--end' => $endlsn,
+		'--path' => $path,
 		@opts
 	  ],
 	  '>' => \$stdout,
@@ -288,38 +261,83 @@ sub test_pg_waldump
 
 my @lines;
 
-@lines = test_pg_waldump;
-is(grep(!/^rmgr: \w/, @lines), 0, 'all output lines are rmgr lines');
+my @scenarios = (
+	{
+		'path' => $node->data_dir
+	});
 
-@lines = test_pg_waldump('--limit' => 6);
-is(@lines, 6, 'limit option observed');
+for my $scenario (@scenarios)
+{
+	my $path = $scenario->{'path'};
 
-@lines = test_pg_waldump('--fullpage');
-is(grep(!/^rmgr:.*\bFPW\b/, @lines), 0, 'all output lines are FPW');
+	SKIP:
+	{
+		command_fails_like(
+			[ 'pg_waldump', '--path' => $path ],
+			qr/error: no start WAL location given/,
+			'path option requires start location');
+		command_like(
+			[
+				'pg_waldump',
+				'--path' => $path,
+				'--start' => $start_lsn,
+				'--end' => $end_lsn,
+			],
+			qr/./,
+			'runs with path option and start and end locations');
+		command_fails_like(
+			[
+				'pg_waldump',
+				'--path' => $path,
+				'--start' => $start_lsn,
+			],
+			qr/error: error in WAL record at/,
+			'falling off the end of the WAL results in an error');
 
-@lines = test_pg_waldump('--stats');
-like($lines[0], qr/WAL statistics/, "statistics on stdout");
-is(grep(/^rmgr:/, @lines), 0, 'no rmgr lines output');
+		command_fails_like(
+			[
+				'pg_waldump', '--quiet',
+				'--path' => $path,
+				'--start' => $start_lsn
+			],
+			qr/error: error in WAL record at/,
+			'errors are shown with --quiet');
 
-@lines = test_pg_waldump('--stats=record');
-like($lines[0], qr/WAL statistics/, "statistics on stdout");
-is(grep(/^rmgr:/, @lines), 0, 'no rmgr lines output');
+		test_pg_waldump_skip_bytes($path, $start_lsn, $end_lsn);
 
-@lines = test_pg_waldump('--rmgr' => 'Btree');
-is(grep(!/^rmgr: Btree/, @lines), 0, 'only Btree lines');
+		@lines = test_pg_waldump($path, $start_lsn, $end_lsn);
+		is(grep(!/^rmgr: \w/, @lines), 0, 'all output lines are rmgr lines');
 
-@lines = test_pg_waldump('--fork' => 'init');
-is(grep(!/fork init/, @lines), 0, 'only init fork lines');
+		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--limit' => 6);
+		is(@lines, 6, 'limit option observed');
 
-@lines = test_pg_waldump(
-	'--relation' => "$default_ts_oid/$postgres_db_oid/$rel_t1_oid");
-is(grep(!/rel $default_ts_oid\/$postgres_db_oid\/$rel_t1_oid/, @lines),
-	0, 'only lines for selected relation');
+		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--fullpage');
+		is(grep(!/^rmgr:.*\bFPW\b/, @lines), 0, 'all output lines are FPW');
 
-@lines = test_pg_waldump(
-	'--relation' => "$default_ts_oid/$postgres_db_oid/$rel_i1a_oid",
-	'--block' => 1);
-is(grep(!/\bblk 1\b/, @lines), 0, 'only lines for selected block');
+		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--stats');
+		like($lines[0], qr/WAL statistics/, "statistics on stdout");
+		is(grep(/^rmgr:/, @lines), 0, 'no rmgr lines output');
 
+		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--stats=record');
+		like($lines[0], qr/WAL statistics/, "statistics on stdout");
+		is(grep(/^rmgr:/, @lines), 0, 'no rmgr lines output');
+
+		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--rmgr' => 'Btree');
+		is(grep(!/^rmgr: Btree/, @lines), 0, 'only Btree lines');
+
+		@lines = test_pg_waldump($path, $start_lsn, $end_lsn, '--fork' => 'init');
+		is(grep(!/fork init/, @lines), 0, 'only init fork lines');
+
+		@lines = test_pg_waldump($path, $start_lsn, $end_lsn,
+			'--relation' => "$default_ts_oid/$postgres_db_oid/$rel_t1_oid");
+		is(grep(!/rel $default_ts_oid\/$postgres_db_oid\/$rel_t1_oid/, @lines),
+			0, 'only lines for selected relation');
+
+		@lines = test_pg_waldump($path, $start_lsn, $end_lsn,
+			'--relation' => "$default_ts_oid/$postgres_db_oid/$rel_i1a_oid",
+			'--block' => 1);
+		is(grep(!/\bblk 1\b/, @lines), 0, 'only lines for selected block');
+	}
+}
 
 done_testing();
