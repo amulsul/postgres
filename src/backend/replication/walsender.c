@@ -1342,7 +1342,7 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 		{
 			Snapshot	snap;
 
-			snap = SnapBuildInitialSnapshot(ctx->snapshot_builder);
+			snap = SnapBuildInitialSnapshot(ctx->snapshot_builder, false);
 			RestoreTransactionSnapshot(snap, MyProc);
 		}
 

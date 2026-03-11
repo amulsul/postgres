@@ -72,7 +72,7 @@ extern void FreeSnapshotBuilder(SnapBuild *builder);
 
 extern void SnapBuildSnapDecRefcount(Snapshot snap);
 
-extern Snapshot SnapBuildInitialSnapshot(SnapBuild *builder);
+extern Snapshot SnapBuildInitialSnapshot(SnapBuild *builder, bool repack);
 extern const char *SnapBuildExportSnapshot(SnapBuild *builder);
 extern void SnapBuildClearExportedSnapshot(void);
 extern void SnapBuildResetExportedSnapshotState(void);

@@ -2575,7 +2575,7 @@ lreplace:
 								0,
 								estate->es_snapshot,
 								estate->es_crosscheck_snapshot,
-								true /* wait for commit */ ,
+								true,
 								&context->tmfd, &updateCxt->lockmode,
 								&updateCxt->updateIndexes);
 

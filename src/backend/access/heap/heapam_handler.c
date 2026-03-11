@@ -51,6 +51,11 @@
 static void reform_and_rewrite_tuple(HeapTuple tuple,
 									 Relation OldHeap, Relation NewHeap,
 									 Datum *values, bool *isnull, RewriteState rwstate);
+static void heap_insert_for_repack(HeapTuple tuple, Relation OldHeap,
+								   Relation NewHeap, Datum *values, bool *isnull,
+								   BulkInsertState bistate);
+static HeapTuple reform_tuple(HeapTuple tuple, Relation OldHeap,
+							  Relation NewHeap, Datum *values, bool *isnull);
 
 static bool SampleHeapTupleVisible(TableScanDesc scan, Buffer buffer,
 								   HeapTuple tuple,
@@ -700,13 +705,15 @@ static void
 heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								 Relation OldIndex, bool use_sort,
 								 TransactionId OldestXmin,
+								 Snapshot snapshot,
 								 TransactionId *xid_cutoff,
 								 MultiXactId *multi_cutoff,
 								 double *num_tuples,
 								 double *tups_vacuumed,
 								 double *tups_recently_dead)
 {
-	RewriteState rwstate;
+	RewriteState rwstate = NULL;
+	BulkInsertState bistate = NULL;
 	IndexScanDesc indexScan;
 	TableScanDesc tableScan;
 	HeapScanDesc heapScan;
@@ -720,6 +727,7 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	bool	   *isnull;
 	BufferHeapTupleTableSlot *hslot;
 	BlockNumber prev_cblock = InvalidBlockNumber;
+	bool		concurrent = snapshot != NULL;
 
 	/* Remember if it's a system catalog */
 	is_system_catalog = IsSystemRelation(OldHeap);
@@ -735,9 +743,14 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	values = palloc_array(Datum, natts);
 	isnull = palloc_array(bool, natts);
 
-	/* Initialize the rewrite operation */
-	rwstate = begin_heap_rewrite(OldHeap, NewHeap, OldestXmin, *xid_cutoff,
-								 *multi_cutoff);
+	/*
+	 * Initialize the rewrite operation.
+	 */
+	if (!concurrent)
+		rwstate = begin_heap_rewrite(OldHeap, NewHeap, OldestXmin,
+									 *xid_cutoff, *multi_cutoff);
+	else
+		bistate = GetBulkInsertState();
 
 
 	/* Set up sorting if wanted */
@@ -752,6 +765,9 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 * Prepare to scan the OldHeap.  To ensure we see recently-dead tuples
 	 * that still need to be copied, we scan with SnapshotAny and use
 	 * HeapTupleSatisfiesVacuum for the visibility test.
+	 *
+	 * In the CONCURRENTLY case, we do regular MVCC visibility tests, using
+	 * the snapshot passed by the caller.
 	 */
 	if (OldIndex != NULL && !use_sort)
 	{
@@ -768,7 +784,9 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 		tableScan = NULL;
 		heapScan = NULL;
-		indexScan = index_beginscan(OldHeap, OldIndex, SnapshotAny, NULL, 0, 0,
+		indexScan = index_beginscan(OldHeap, OldIndex,
+									snapshot ? snapshot : SnapshotAny,
+									NULL, 0, 0,
 									SO_NONE);
 		index_rescan(indexScan, NULL, 0, NULL, 0);
 	}
@@ -778,7 +796,9 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		pgstat_progress_update_param(PROGRESS_REPACK_PHASE,
 									 PROGRESS_REPACK_PHASE_SEQ_SCAN_HEAP);
 
-		tableScan = table_beginscan(OldHeap, SnapshotAny, 0, (ScanKey) NULL,
+		tableScan = table_beginscan(OldHeap,
+									snapshot ? snapshot : SnapshotAny,
+									0, (ScanKey) NULL,
 									SO_NONE);
 		heapScan = (HeapScanDesc) tableScan;
 		indexScan = NULL;
@@ -855,83 +875,91 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		buf = hslot->buffer;
 
 		/*
-		 * To be able to guarantee that we can set the hint bit, acquire an
-		 * exclusive lock on the old buffer. We need the hint bits, set in
-		 * heapam_relation_copy_for_cluster() -> HeapTupleSatisfiesVacuum(),
-		 * to be set, as otherwise reform_and_rewrite_tuple() ->
-		 * rewrite_heap_tuple() will get confused. Specifically,
-		 * rewrite_heap_tuple() checks for HEAP_XMAX_INVALID in the old tuple
-		 * to determine whether to check the old-to-new mapping hash table.
-		 *
-		 * It'd be better if we somehow could avoid setting hint bits on the
-		 * old page. One reason to use VACUUM FULL are very bloated tables -
-		 * rewriting most of the old table during VACUUM FULL doesn't exactly
-		 * help...
+		 * Regarding CONCURRENTLY, see the comments on MVCC snapshot above.
 		 */
-		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-
-		switch (HeapTupleSatisfiesVacuum(tuple, OldestXmin, buf))
+		if (!concurrent)
 		{
-			case HEAPTUPLE_DEAD:
-				/* Definitely dead */
-				isdead = true;
-				break;
-			case HEAPTUPLE_RECENTLY_DEAD:
-				*tups_recently_dead += 1;
-				pg_fallthrough;
-			case HEAPTUPLE_LIVE:
-				/* Live or recently dead, must copy it */
-				isdead = false;
-				break;
-			case HEAPTUPLE_INSERT_IN_PROGRESS:
+			/*
+			 * To be able to guarantee that we can set the hint bit, acquire
+			 * an exclusive lock on the old buffer. We need the hint bits, set
+			 * in heapam_relation_copy_for_cluster() ->
+			 * HeapTupleSatisfiesVacuum(), to be set, as otherwise
+			 * reform_and_rewrite_tuple() -> rewrite_heap_tuple() will get
+			 * confused. Specifically, rewrite_heap_tuple() checks for
+			 * HEAP_XMAX_INVALID in the old tuple to determine whether to
+			 * check the old-to-new mapping hash table.
+			 *
+			 * It'd be better if we somehow could avoid setting hint bits on
+			 * the old page. One reason to use VACUUM FULL are very bloated
+			 * tables - rewriting most of the old table during VACUUM FULL
+			 * doesn't exactly help...
+			 */
+			LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
-				/*
-				 * Since we hold exclusive lock on the relation, normally the
-				 * only way to see this is if it was inserted earlier in our
-				 * own transaction.  However, it can happen in system
-				 * catalogs, since we tend to release write lock before commit
-				 * there.  Give a warning if neither case applies; but in any
-				 * case we had better copy it.
-				 */
-				if (!is_system_catalog &&
-					!TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tuple->t_data)))
-					elog(WARNING, "concurrent insert in progress within table \"%s\"",
-						 RelationGetRelationName(OldHeap));
-				/* treat as live */
-				isdead = false;
-				break;
-			case HEAPTUPLE_DELETE_IN_PROGRESS:
-
-				/*
-				 * Similar situation to INSERT_IN_PROGRESS case.
-				 */
-				if (!is_system_catalog &&
-					!TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetUpdateXid(tuple->t_data)))
-					elog(WARNING, "concurrent delete in progress within table \"%s\"",
-						 RelationGetRelationName(OldHeap));
-				/* treat as recently dead */
-				*tups_recently_dead += 1;
-				isdead = false;
-				break;
-			default:
-				elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
-				isdead = false; /* keep compiler quiet */
-				break;
-		}
-
-		LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
-		if (isdead)
-		{
-			*tups_vacuumed += 1;
-			/* heap rewrite module still needs to see it... */
-			if (rewrite_heap_dead_tuple(rwstate, tuple))
+			switch (HeapTupleSatisfiesVacuum(tuple, OldestXmin, buf))
 			{
-				/* A previous recently-dead tuple is now known dead */
-				*tups_vacuumed += 1;
-				*tups_recently_dead -= 1;
+				case HEAPTUPLE_DEAD:
+					/* Definitely dead */
+					isdead = true;
+					break;
+				case HEAPTUPLE_RECENTLY_DEAD:
+					*tups_recently_dead += 1;
+					pg_fallthrough;
+				case HEAPTUPLE_LIVE:
+					/* Live or recently dead, must copy it */
+					isdead = false;
+					break;
+				case HEAPTUPLE_INSERT_IN_PROGRESS:
+
+					/*
+					 * As long as we hold exclusive lock on the relation,
+					 * normally the only way to see this is if it was inserted
+					 * earlier in our own transaction.  However, it can happen
+					 * in system catalogs, since we tend to release write lock
+					 * before commit there. Give a warning if neither case
+					 * applies; but in any case we had better copy it.
+					 */
+					if (!is_system_catalog &&
+						!TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tuple->t_data)))
+						elog(WARNING, "concurrent insert in progress within table \"%s\"",
+							 RelationGetRelationName(OldHeap));
+					/* treat as live */
+					isdead = false;
+					break;
+				case HEAPTUPLE_DELETE_IN_PROGRESS:
+
+					/*
+					 * Similar situation to INSERT_IN_PROGRESS case.
+					 */
+					if (!is_system_catalog &&
+						!TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetUpdateXid(tuple->t_data)))
+						elog(WARNING, "concurrent delete in progress within table \"%s\"",
+							 RelationGetRelationName(OldHeap));
+					/* treat as recently dead */
+					*tups_recently_dead += 1;
+					isdead = false;
+					break;
+				default:
+					elog(ERROR, "unexpected HeapTupleSatisfiesVacuum result");
+					isdead = false; /* keep compiler quiet */
+					break;
 			}
-			continue;
+
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			if (isdead)
+			{
+				*tups_vacuumed += 1;
+				/* heap rewrite module still needs to see it... */
+				if (rewrite_heap_dead_tuple(rwstate, tuple))
+				{
+					/* A previous recently-dead tuple is now known dead */
+					*tups_vacuumed += 1;
+					*tups_recently_dead -= 1;
+				}
+
+				continue;
+			}
 		}
 
 		*num_tuples += 1;
@@ -950,12 +978,16 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 		{
 			const int	ct_index[] = {
 				PROGRESS_REPACK_HEAP_TUPLES_SCANNED,
-				PROGRESS_REPACK_HEAP_TUPLES_WRITTEN
+				PROGRESS_REPACK_HEAP_TUPLES_INSERTED
 			};
 			int64		ct_val[2];
 
-			reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
-									 values, isnull, rwstate);
+			if (!concurrent)
+				reform_and_rewrite_tuple(tuple, OldHeap, NewHeap,
+										 values, isnull, rwstate);
+			else
+				heap_insert_for_repack(tuple, OldHeap, NewHeap,
+									   values, isnull, bistate);
 
 			/*
 			 * In indexscan mode and also VACUUM FULL, report increase in
@@ -1003,12 +1035,17 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				break;
 
 			n_tuples += 1;
-			reform_and_rewrite_tuple(tuple,
-									 OldHeap, NewHeap,
-									 values, isnull,
-									 rwstate);
+			if (!concurrent)
+				reform_and_rewrite_tuple(tuple,
+										 OldHeap, NewHeap,
+										 values, isnull,
+										 rwstate);
+			else
+				heap_insert_for_repack(tuple, OldHeap, NewHeap,
+									   values, isnull, bistate);
+
 			/* Report n_tuples */
-			pgstat_progress_update_param(PROGRESS_REPACK_HEAP_TUPLES_WRITTEN,
+			pgstat_progress_update_param(PROGRESS_REPACK_HEAP_TUPLES_INSERTED,
 										 n_tuples);
 		}
 
@@ -1016,7 +1053,10 @@ heapam_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	}
 
 	/* Write out any remaining tuples, and fsync if needed */
-	end_heap_rewrite(rwstate);
+	if (rwstate)
+		end_heap_rewrite(rwstate);
+	if (bistate)
+		FreeBulkInsertState(bistate);
 
 	/* Clean up */
 	pfree(values);
@@ -2415,26 +2455,65 @@ reform_and_rewrite_tuple(HeapTuple tuple,
 						 Relation OldHeap, Relation NewHeap,
 						 Datum *values, bool *isnull, RewriteState rwstate)
 {
+	HeapTuple	copiedTuple;
+
+	copiedTuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
+
+	/* The heap rewrite module does the rest */
+	rewrite_heap_tuple(rwstate, tuple, copiedTuple);
+
+	heap_freetuple(copiedTuple);
+}
+
+/*
+ * Insert tuple when processing REPACK CONCURRENTLY.
+ *
+ * rewriteheap.c is not used in the CONCURRENTLY case because it'd be
+ * difficult to do the same in the catch-up phase (as the logical
+ * decoding does not provide us with sufficient visibility
+ * information). Thus we must use heap_insert() both during the
+ * catch-up and here.
+ *
+ * We pass the NO_LOGICAL flag to heap_insert() in order to skip logical
+ * decoding: as soon as REPACK CONCURRENTLY swaps the relation files, it drops
+ * this relation, so no logical replication subscription should need the data.
+ *
+ * BulkInsertState is used because many tuples are inserted in the typical
+ * case.
+ */
+static void
+heap_insert_for_repack(HeapTuple tuple, Relation OldHeap, Relation NewHeap,
+					   Datum *values, bool *isnull, BulkInsertState bistate)
+{
+	tuple = reform_tuple(tuple, OldHeap, NewHeap, values, isnull);
+
+	heap_insert(NewHeap, tuple, GetCurrentCommandId(true),
+				HEAP_INSERT_NO_LOGICAL, bistate);
+
+	heap_freetuple(tuple);
+}
+
+/*
+ * Deform tuple, set values of dropped columns to NULL, form a new tuple and
+ * return it.
+ */
+static HeapTuple
+reform_tuple(HeapTuple tuple, Relation OldHeap, Relation NewHeap,
+			 Datum *values, bool *isnull)
+{
 	TupleDesc	oldTupDesc = RelationGetDescr(OldHeap);
 	TupleDesc	newTupDesc = RelationGetDescr(NewHeap);
-	HeapTuple	copiedTuple;
 	int			i;
 
 	heap_deform_tuple(tuple, oldTupDesc, values, isnull);
 
-	/* Be sure to null out any dropped columns */
 	for (i = 0; i < newTupDesc->natts; i++)
 	{
 		if (TupleDescCompactAttr(newTupDesc, i)->attisdropped)
 			isnull[i] = true;
 	}
 
-	copiedTuple = heap_form_tuple(newTupDesc, values, isnull);
-
-	/* The heap rewrite module does the rest */
-	rewrite_heap_tuple(rwstate, tuple, copiedTuple);
-
-	heap_freetuple(copiedTuple);
+	return heap_form_tuple(newTupDesc, values, isnull);
 }
 
 /*

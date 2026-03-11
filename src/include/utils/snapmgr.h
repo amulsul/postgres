@@ -78,6 +78,8 @@ extern Snapshot GetTransactionSnapshot(void);
 extern Snapshot GetLatestSnapshot(void);
 extern void SnapshotSetCommandId(CommandId curcid);
 
+extern void FreeSnapshot(Snapshot snapshot);
+
 extern Snapshot GetCatalogSnapshot(Oid relid);
 extern Snapshot GetNonHistoricCatalogSnapshot(Oid relid);
 extern void InvalidateCatalogSnapshot(void);

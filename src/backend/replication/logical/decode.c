@@ -33,6 +33,7 @@
 #include "access/xlogreader.h"
 #include "access/xlogrecord.h"
 #include "catalog/pg_control.h"
+#include "commands/repack.h"
 #include "replication/decode.h"
 #include "replication/logical.h"
 #include "replication/message.h"
@@ -420,7 +421,8 @@ heap2_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	{
 		case XLOG_HEAP2_MULTI_INSERT:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeMultiInsert(ctx, buf);
 			break;
 		case XLOG_HEAP2_NEW_CID:
@@ -465,6 +467,15 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	TransactionId xid = XLogRecGetXid(buf->record);
 	SnapBuild  *builder = ctx->snapshot_builder;
 
+	/*
+	 * XXX Should we return here if change_useless_for_repack() returns true,
+	 * instead of calling the function below? Unlike the fast-forward case, we
+	 * shouldn't need the base snapshot for the containing transaction until
+	 * we receive a change that belongs to the table being REPACKed. Thus it
+	 * should be fine to skip SnapBuildProcessChange(), and therefore
+	 * reorderbuffer.c can create the transaction later.
+	 */
+
 	ReorderBufferProcessXid(ctx->reorder, xid, buf->origptr);
 
 	/*
@@ -482,7 +493,8 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	{
 		case XLOG_HEAP_INSERT:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeInsert(ctx, buf);
 			break;
 
@@ -494,19 +506,22 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 		case XLOG_HEAP_HOT_UPDATE:
 		case XLOG_HEAP_UPDATE:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeUpdate(ctx, buf);
 			break;
 
 		case XLOG_HEAP_DELETE:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeDelete(ctx, buf);
 			break;
 
 		case XLOG_HEAP_TRUNCATE:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeTruncate(ctx, buf);
 			break;
 
@@ -522,7 +537,8 @@ heap_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 
 		case XLOG_HEAP_CONFIRM:
 			if (SnapBuildProcessChange(builder, xid, buf->origptr) &&
-				!ctx->fast_forward)
+				!ctx->fast_forward &&
+				!change_useless_for_repack(buf))
 				DecodeSpecConfirm(ctx, buf);
 			break;
 
@@ -1018,6 +1034,15 @@ DecodeDelete(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	RelFileLocator target_locator;
 
 	xlrec = (xl_heap_delete *) XLogRecGetData(r);
+
+	/*
+	 * Ignore changes which are considered useless for logical decoding.
+	 * Currently such changes are created by REPACK (CONCURRENTLY) when
+	 * replays DELETE commands on the new table (which is not yet visible to
+	 * other transactions).
+	 */
+	if (xlrec->flags & XLH_DELETE_NO_LOGICAL)
+		return;
 
 	/* only interested in our database */
 	XLogRecGetBlockTag(r, 0, &target_locator, NULL, NULL);

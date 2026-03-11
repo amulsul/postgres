@@ -194,7 +194,11 @@ StartupDecodingContext(List *output_plugin_options,
 
 	ctx->slot = slot;
 
-	ctx->reader = XLogReaderAllocate(wal_segment_size, NULL, xl_routine, ctx);
+	/*
+	 * TODO A separate patch for PG core, unless there's really a reason to
+	 * pass ctx for private_data (May extensions expect ctx?).
+	 */
+	ctx->reader = XLogReaderAllocate(wal_segment_size, NULL, xl_routine, NULL);
 	if (!ctx->reader)
 		ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
