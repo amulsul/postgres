@@ -2643,14 +2643,24 @@ GetRunningTransactionData(void)
 	RunningTransactions CurrentRunningXacts = &CurrentRunningXactsData;
 	TransactionId latestCompletedXid;
 	TransactionId oldestRunningXid;
+	TransactionId oldestRunningXidLogical;
 	TransactionId oldestDatabaseRunningXid;
 	TransactionId *xids;
 	int			index;
-	int			count;
+	int			count,
+				count_repack;
 	int			subcount;
 	bool		suboverflowed;
+	TransactionId *xids_repack = NULL;
+	bool		logical_decoding_enabled = IsLogicalDecodingEnabled();
 
 	Assert(!RecoveryInProgress());
+
+	/*
+	 * TODO Consider a GUC to reserve certain amount of replication slots for
+	 * REPACK (CONCURRENTLY) and using it here.
+	 */
+#define		MAX_REPACK_XIDS		16
 
 	/*
 	 * Allocating space for maxProcs xids is usually overkill; numProcs would
@@ -2663,11 +2673,14 @@ GetRunningTransactionData(void)
 	 */
 	if (CurrentRunningXacts->xids == NULL)
 	{
+		/* FIXME probably fails if logical decoding is enable on-the-fly */
+		int			nrepack = logical_decoding_enabled ? MAX_REPACK_XIDS : 0;
+
 		/*
 		 * First call
 		 */
 		CurrentRunningXacts->xids = (TransactionId *)
-			malloc(TOTAL_MAX_CACHED_SUBXIDS * sizeof(TransactionId));
+			malloc((TOTAL_MAX_CACHED_SUBXIDS + nrepack) * sizeof(TransactionId));
 		if (CurrentRunningXacts->xids == NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -2676,7 +2689,10 @@ GetRunningTransactionData(void)
 
 	xids = CurrentRunningXacts->xids;
 
-	count = subcount = 0;
+	if (logical_decoding_enabled)
+		xids_repack = palloc_array(TransactionId, MAX_REPACK_XIDS);
+
+	count = subcount = count_repack = 0;
 	suboverflowed = false;
 
 	/*
@@ -2688,7 +2704,7 @@ GetRunningTransactionData(void)
 
 	latestCompletedXid =
 		XidFromFullTransactionId(TransamVariables->latestCompletedXid);
-	oldestDatabaseRunningXid = oldestRunningXid =
+	oldestDatabaseRunningXid = oldestRunningXid = oldestRunningXidLogical =
 		XidFromFullTransactionId(TransamVariables->nextXid);
 
 	/*
@@ -2697,6 +2713,8 @@ GetRunningTransactionData(void)
 	for (index = 0; index < arrayP->numProcs; index++)
 	{
 		TransactionId xid;
+		int			pgprocno;
+		PGPROC	   *proc;
 
 		/* Fetch xid just once - see GetNewTransactionId */
 		xid = UINT32_ACCESS_ONCE(other_xids[index]);
@@ -2716,6 +2734,21 @@ GetRunningTransactionData(void)
 		if (TransactionIdPrecedes(xid, oldestRunningXid))
 			oldestRunningXid = xid;
 
+		if (logical_decoding_enabled &&
+			TransactionIdPrecedes(xid, oldestRunningXidLogical))
+		{
+			/*
+			 * Backends running REPACK concurrently need to be excluded from
+			 * oldestRunningXidLogical, otherwise the snapshot builder cannot
+			 * proceed in building the initial snapshot.
+			 */
+			pgprocno = arrayP->pgprocnos[index];
+			proc = &allProcs[pgprocno];
+
+			if ((proc->statusFlags & PROC_IN_CONCURRENT_REPACK) == 0)
+				oldestRunningXidLogical = xid;
+		}
+
 		/*
 		 * Also, update the oldest running xid within the current database. As
 		 * fetching pgprocno and PGPROC could cause cache misses, we do cheap
@@ -2723,8 +2756,8 @@ GetRunningTransactionData(void)
 		 */
 		if (TransactionIdPrecedes(xid, oldestDatabaseRunningXid))
 		{
-			int			pgprocno = arrayP->pgprocnos[index];
-			PGPROC	   *proc = &allProcs[pgprocno];
+			pgprocno = arrayP->pgprocnos[index];
+			proc = &allProcs[pgprocno];
 
 			if (proc->databaseId == MyDatabaseId)
 				oldestDatabaseRunningXid = xid;
@@ -2742,6 +2775,19 @@ GetRunningTransactionData(void)
 		 */
 
 		xids[count++] = xid;
+
+		/*
+		 * Collect XIDSs of transactions running REPACK (CONCURRENTLY).
+		 */
+		if (logical_decoding_enabled &&
+			count_repack < MAX_REPACK_XIDS)
+		{
+			pgprocno = arrayP->pgprocnos[index];
+			proc = &allProcs[pgprocno];
+
+			if (proc->statusFlags & PROC_IN_CONCURRENT_REPACK)
+				xids_repack[count_repack++] = xid;
+		}
 	}
 
 	/*
@@ -2783,6 +2829,19 @@ GetRunningTransactionData(void)
 	}
 
 	/*
+	 * Append the XIDs running REPACK (CONCURRENTLY), if any.
+	 *
+	 * XXX Should we sort the array and use bsearch() when using it?
+	 */
+	if (count_repack > 0)
+	{
+		for (int i = 0; i < count_repack; i++)
+			xids[count++] = xids_repack[i];
+	}
+	if (xids_repack)
+		pfree(xids_repack);
+
+	/*
 	 * It's important *not* to include the limits set by slots here because
 	 * snapbuild.c uses oldestRunningXid to manage its xmin horizon. If those
 	 * were to be included here the initial value could never increase because
@@ -2791,11 +2850,13 @@ GetRunningTransactionData(void)
 	 * increases if slots do.
 	 */
 
-	CurrentRunningXacts->xcnt = count - subcount;
+	CurrentRunningXacts->xcnt = count - subcount - count_repack;
 	CurrentRunningXacts->subxcnt = subcount;
+	CurrentRunningXacts->xcnt_repack = count_repack;
 	CurrentRunningXacts->subxid_status = suboverflowed ? SUBXIDS_IN_SUBTRANS : SUBXIDS_IN_ARRAY;
 	CurrentRunningXacts->nextXid = XidFromFullTransactionId(TransamVariables->nextXid);
 	CurrentRunningXacts->oldestRunningXid = oldestRunningXid;
+	CurrentRunningXacts->oldestRunningXidLogical = oldestRunningXidLogical;
 	CurrentRunningXacts->oldestDatabaseRunningXid = oldestDatabaseRunningXid;
 	CurrentRunningXacts->latestCompletedXid = latestCompletedXid;
 

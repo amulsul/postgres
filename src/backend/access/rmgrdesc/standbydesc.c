@@ -21,10 +21,11 @@ standby_desc_running_xacts(StringInfo buf, xl_running_xacts *xlrec)
 {
 	int			i;
 
-	appendStringInfo(buf, "nextXid %u latestCompletedXid %u oldestRunningXid %u",
+	appendStringInfo(buf, "nextXid %u latestCompletedXid %u oldestRunningXid %u oldestRunningXidLogical %u",
 					 xlrec->nextXid,
 					 xlrec->latestCompletedXid,
-					 xlrec->oldestRunningXid);
+					 xlrec->oldestRunningXid,
+					 xlrec->oldestRunningXidLogical);
 	if (xlrec->xcnt > 0)
 	{
 		appendStringInfo(buf, "; %d xacts:", xlrec->xcnt);
@@ -40,6 +41,16 @@ standby_desc_running_xacts(StringInfo buf, xl_running_xacts *xlrec)
 		appendStringInfo(buf, "; %d subxacts:", xlrec->subxcnt);
 		for (i = 0; i < xlrec->subxcnt; i++)
 			appendStringInfo(buf, " %u", xlrec->xids[xlrec->xcnt + i]);
+	}
+
+	if (xlrec->xcnt_repack > 0)
+	{
+		TransactionId *xids_repack;
+
+		appendStringInfo(buf, "; %d xacts_repack:", xlrec->xcnt_repack);
+		xids_repack = xlrec->xids + xlrec->xcnt + xlrec->subxcnt;
+		for (i = 0; i < xlrec->xcnt_repack; i++)
+			appendStringInfo(buf, " %u", xids_repack[i]);
 	}
 }
 

@@ -47,10 +47,12 @@ typedef struct xl_standby_locks
 typedef struct xl_running_xacts
 {
 	int			xcnt;			/* # of xact ids in xids[] */
+	int			xcnt_repack;	/* # of xacts running REPACK (CONCURRENTLY) */
 	int			subxcnt;		/* # of subxact ids in xids[] */
 	bool		subxid_overflow;	/* snapshot overflowed, subxids missing */
 	TransactionId nextXid;		/* xid from TransamVariables->nextXid */
 	TransactionId oldestRunningXid; /* *not* oldestXmin */
+	TransactionId oldestRunningXidLogical;
 	TransactionId latestCompletedXid;	/* so we can set xmax */
 
 	TransactionId xids[FLEXIBLE_ARRAY_MEMBER];

@@ -1189,6 +1189,7 @@ standby_redo(XLogReaderState *record)
 		RunningTransactionsData running;
 
 		running.xcnt = xlrec->xcnt;
+		running.xcnt_repack = xlrec->xcnt_repack;
 		running.subxcnt = xlrec->subxcnt;
 		running.subxid_status = xlrec->subxid_overflow ? SUBXIDS_MISSING : SUBXIDS_IN_ARRAY;
 		running.nextXid = xlrec->nextXid;
@@ -1359,10 +1360,12 @@ LogCurrentRunningXacts(RunningTransactions CurrRunningXacts)
 	XLogRecPtr	recptr;
 
 	xlrec.xcnt = CurrRunningXacts->xcnt;
+	xlrec.xcnt_repack = CurrRunningXacts->xcnt_repack;
 	xlrec.subxcnt = CurrRunningXacts->subxcnt;
 	xlrec.subxid_overflow = (CurrRunningXacts->subxid_status != SUBXIDS_IN_ARRAY);
 	xlrec.nextXid = CurrRunningXacts->nextXid;
 	xlrec.oldestRunningXid = CurrRunningXacts->oldestRunningXid;
+	xlrec.oldestRunningXidLogical = CurrRunningXacts->oldestRunningXidLogical;
 	xlrec.latestCompletedXid = CurrRunningXacts->latestCompletedXid;
 
 	/* Header */
@@ -1371,9 +1374,10 @@ LogCurrentRunningXacts(RunningTransactions CurrRunningXacts)
 	XLogRegisterData(&xlrec, MinSizeOfXactRunningXacts);
 
 	/* array of TransactionIds */
-	if (xlrec.xcnt > 0)
+	if (xlrec.xcnt + xlrec.xcnt_repack > 0)
 		XLogRegisterData(CurrRunningXacts->xids,
-						 (xlrec.xcnt + xlrec.subxcnt) * sizeof(TransactionId));
+						 (xlrec.xcnt + xlrec.xcnt_repack + xlrec.subxcnt) *
+						 sizeof(TransactionId));
 
 	recptr = XLogInsert(RM_STANDBY_ID, XLOG_RUNNING_XACTS);
 

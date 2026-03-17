@@ -127,10 +127,12 @@ typedef enum
 typedef struct RunningTransactionsData
 {
 	int			xcnt;			/* # of xact ids in xids[] */
+	int			xcnt_repack;	/* # of xacts running REPACK (CONCURRENTLY). */
 	int			subxcnt;		/* # of subxact ids in xids[] */
 	subxids_array_status subxid_status;
 	TransactionId nextXid;		/* xid from TransamVariables->nextXid */
 	TransactionId oldestRunningXid; /* *not* oldestXmin */
+	TransactionId oldestRunningXidLogical;
 	TransactionId oldestDatabaseRunningXid; /* same as above, but within the
 											 * current database */
 	TransactionId latestCompletedXid;	/* so we can set xmax */

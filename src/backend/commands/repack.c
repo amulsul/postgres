@@ -994,6 +994,22 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 	if (concurrent)
 	{
 		/*
+		 * Do not let other backends wait for our completion during their
+		 * setup of logical replication. Unlike logical replication publisher,
+		 * we will have XID assigned, so the other backends - whether
+		 * walsenders involved in logical replication or regular backends
+		 * executing also REPACK (CONCURRENTLY) - would have to wait for our
+		 * completion before they can build their initial snapshot. It is o.k.
+		 * for any decoding backend to ignore us because we do not change
+		 * tuple descriptor of any table, and the data changes we write should
+		 * not be decoded by other backends.
+		 */
+		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+		MyProc->statusFlags |= PROC_IN_CONCURRENT_REPACK;
+		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+		LWLockRelease(ProcArrayLock);
+
+		/*
 		 * The worker needs to be member of the locking group we're the leader
 		 * of. We ought to become the leader before the worker starts. The
 		 * worker will join the group as soon as it starts.

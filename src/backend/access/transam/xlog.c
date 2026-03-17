@@ -5912,6 +5912,7 @@ StartupXLOG(void)
 				 * subxids are listed with their parent prepared transactions.
 				 */
 				running.xcnt = nxids;
+				running.xcnt_repack = 0;
 				running.subxcnt = 0;
 				running.subxid_status = SUBXIDS_IN_SUBTRANS;
 				running.nextXid = XidFromFullTransactionId(checkPoint.nextXid);
@@ -8483,6 +8484,7 @@ xlog_redo(XLogReaderState *record)
 			 * with their parent prepared transactions.
 			 */
 			running.xcnt = nxids;
+			running.xcnt_repack = 0;
 			running.subxcnt = 0;
 			running.subxid_status = SUBXIDS_IN_SUBTRANS;
 			running.nextXid = XidFromFullTransactionId(checkPoint.nextXid);
