@@ -834,7 +834,8 @@ IndexInfo *
 makeIndexInfo(int numattrs, int numkeyattrs, Oid amoid, List *expressions,
 			  List *predicates, bool unique, bool nulls_not_distinct,
 			  bool isready, bool concurrent, bool summarizing,
-			  bool withoutoverlaps)
+			  bool withoutoverlaps, Oid *exclusion_ops, Oid *exclusion_procs,
+			  uint16 *exclusion_strats)
 {
 	IndexInfo  *n = makeNode(IndexInfo);
 
@@ -863,9 +864,9 @@ makeIndexInfo(int numattrs, int numkeyattrs, Oid amoid, List *expressions,
 	n->ii_PredicateState = NULL;
 
 	/* exclusion constraints */
-	n->ii_ExclusionOps = NULL;
-	n->ii_ExclusionProcs = NULL;
-	n->ii_ExclusionStrats = NULL;
+	n->ii_ExclusionOps = exclusion_ops;
+	n->ii_ExclusionProcs = exclusion_procs;
+	n->ii_ExclusionStrats = exclusion_strats;
 
 	/* speculative inserts */
 	n->ii_UniqueOps = NULL;

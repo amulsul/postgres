@@ -244,7 +244,8 @@ CheckIndexCompatible(Oid oldId,
 	 */
 	indexInfo = makeIndexInfo(numberOfAttributes, numberOfAttributes,
 							  accessMethodId, NIL, NIL, false, false,
-							  false, false, amsummarizing, isWithoutOverlaps);
+							  false, false, amsummarizing, isWithoutOverlaps,
+							  NULL, NULL, NULL);
 	typeIds = palloc_array(Oid, numberOfAttributes);
 	collationIds = palloc_array(Oid, numberOfAttributes);
 	opclassIds = palloc_array(Oid, numberOfAttributes);
@@ -931,7 +932,8 @@ DefineIndex(ParseState *pstate,
 							  !concurrent,
 							  concurrent,
 							  amissummarizing,
-							  stmt->iswithoutoverlaps);
+							  stmt->iswithoutoverlaps,
+							  NULL, NULL, NULL);
 
 	typeIds = palloc_array(Oid, numberOfAttributes);
 	collationIds = palloc_array(Oid, numberOfAttributes);
@@ -3989,10 +3991,11 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 			tablespaceid = indexRel->rd_rel->reltablespace;
 
 		/* Create new index definition based on given index */
-		newIndexId = index_concurrently_create_copy(heapRel,
-													idx->indexId,
-													tablespaceid,
-													concurrentName);
+		newIndexId = index_create_copy(heapRel,
+									   true,
+									   idx->indexId,
+									   tablespaceid,
+									   concurrentName);
 
 		/*
 		 * Now open the relation of the new index, a session-level lock is
