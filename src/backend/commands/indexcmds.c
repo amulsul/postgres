@@ -1233,6 +1233,7 @@ DefineIndex(ParseState *pstate,
 		flags |= INDEX_CREATE_PARTITIONED;
 	if (stmt->primary)
 		flags |= INDEX_CREATE_IS_PRIMARY;
+	flags |= INDEX_CREATE_REPORT_PROGRESS;
 
 	/*
 	 * If the table is partitioned, and recursion was declined but partitions
