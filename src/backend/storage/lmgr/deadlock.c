@@ -620,6 +620,21 @@ FindLockCycleRecurseMember(PGPROC *checkProc,
 						proc->statusFlags & PROC_IS_AUTOVACUUM)
 						blocking_autovacuum_proc = proc;
 
+					/*
+					 * Similarly, if we note that we're blocked by some
+					 * process running REPACK (CONCURRENTLY), just fail.  That
+					 * process is going to upgrade its lock at some point, and
+					 * it would be inappropriate for any other process to
+					 * cause that to fail.
+					 */
+					if (checkProc == MyProc &&
+						proc->statusFlags & PROC_IN_CONCURRENT_REPACK)
+						ereport(ERROR,
+								errcode(ERRCODE_OBJECT_IN_USE),
+								errmsg("could not wait for concurrent REPACK"),
+								errdetail("Process %d waits for REPACK running on process %d",
+										  MyProc->pid, proc->pid));
+
 					/* We're done looking at this proclock */
 					break;
 				}

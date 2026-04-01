@@ -277,6 +277,21 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 	lockmode = RepackLockLevel((params.options & CLUOPT_CONCURRENT) != 0);
 
 	/*
+	 * If in concurrent mode, set the PROC_IN_CONCURRENT_REPACK flag.  This
+	 * makes the deadlock checker cause anyone that would conflict with us to
+	 * error out.  It's important to set this flag ahead of actually locking
+	 * the relation; it won't of course affect anyone until we do have a lock
+	 * that others can conflict with.
+	 */
+	if ((params.options & CLUOPT_CONCURRENT) != 0)
+	{
+		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+		MyProc->statusFlags |= PROC_IN_CONCURRENT_REPACK;
+		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+		LWLockRelease(ProcArrayLock);
+	}
+
+	/*
 	 * If a single relation is specified, process it and we're done ... unless
 	 * the relation is a partitioned table, in which case we fall through.
 	 */
@@ -476,11 +491,8 @@ RepackLockLevel(bool concurrent)
  * If indexOid is InvalidOid, the table will be rewritten in physical order
  * instead of index order.
  *
- * Note that, in the concurrent case, the function releases the lock at some
- * point, in order to get AccessExclusiveLock for the final steps (i.e. to
- * swap the relation files). To make things simpler, the caller should expect
- * OldHeap to be closed on return, regardless CLUOPT_CONCURRENT. (The
- * AccessExclusiveLock is kept till the end of the transaction.)
+ * On return, OldHeap is closed but locked with AccessExclusiveLock - the lock
+ * will be released at end of the transaction.
  *
  * 'cmd' indicates which command is being executed, to be used for error
  * messages.
@@ -512,10 +524,12 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 		/*
 		 * Make sure we're not in a transaction block.
 		 *
-		 * The reason is that repack_setup_logical_decoding() could deadlock
-		 * if there's an XID already assigned.  It would be possible to run in
-		 * a transaction block if we had no XID, but this restriction is
-		 * simpler for users to understand and we don't lose anything.
+		 * The reason is that repack_setup_logical_decoding() could wait
+		 * indefinitely for our XID to complete. (The deadlock detector would
+		 * not recognize it because we'd be waiting for ourselves, i.e. no
+		 * real lock conflict.) It would be possible to run in a transaction
+		 * block if we had no XID, but this restriction is simpler for users
+		 * to understand and we don't lose anything.
 		 */
 		PreventInTransactionBlock(isTopLevel, "REPACK (CONCURRENTLY)");
 
@@ -998,10 +1012,8 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 		 * Note that the worker has to wait for all transactions with XID
 		 * already assigned to finish. If some of those transactions is
 		 * waiting for a lock conflicting with ShareUpdateExclusiveLock on our
-		 * table (e.g.  it runs CREATE INDEX), we can end up in a deadlock.
-		 * Not sure this risk is worth unlocking/locking the table (and its
-		 * clustering index) and checking again if it's still eligible for
-		 * REPACK CONCURRENTLY.
+		 * table (e.g. it runs CREATE INDEX), it should encounter ERROR in the
+		 * deadlock checking code.
 		 */
 		start_repack_decoding_worker(tableOid);
 
@@ -3090,7 +3102,19 @@ rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHeap,
 		LockRelationOid(OldHeap->rd_rel->reltoastrelid, AccessExclusiveLock);
 
 	/*
-	 * Tuples and pages of the old heap will be gone, but the heap will stay.
+	 * Now that we have all access-exclusive locks on all relations, we no
+	 * longer want other processes to error out when trying to acquire a
+	 * conflicting lock.  Therefore, unset our flag.
+	 */
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+	MyProc->statusFlags &= ~PROC_IN_CONCURRENT_REPACK;
+	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+	LWLockRelease(ProcArrayLock);
+
+	/*
+	 * Tuples and pages of the old heap will be gone, but the heap itself will
+	 * stay.  In order for predicate locks to continue to work, convert them
+	 * to relation-level locks.  We do this both for table and indexes.
 	 */
 	TransferPredicateLocksToHeapRelation(OldHeap);
 	foreach_ptr(RelationData, index, indexrels)
@@ -3288,9 +3312,11 @@ start_repack_decoding_worker(Oid relid)
 
 	/*
 	 * The decoding setup must be done before the caller can have XID assigned
-	 * for any reason, otherwise the worker might end up in a deadlock,
-	 * waiting for the caller's transaction to end. Therefore wait here until
-	 * the worker indicates that it has the logical decoding initialized.
+	 * for any reason, otherwise the worker might end up waiting for the
+	 * caller's transaction to end. (Deadlock detector does not consider this
+	 * a conflict because the worker is in the same locking group as the
+	 * backend that launched it.) Therefore wait here until the worker
+	 * indicates that it has the logical decoding initialized.
 	 */
 	ConditionVariablePrepareToSleep(&shared->cv);
 	for (;;)

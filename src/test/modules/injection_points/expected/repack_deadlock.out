@@ -1,0 +1,63 @@
+Parsed test spec with 2 sessions
+
+starting permutation: wait_before_lock add_column wakeup_before_lock check1
+injection_points_attach
+-----------------------
+                       
+(1 row)
+
+step wait_before_lock: 
+	REPACK (CONCURRENTLY) repack_deadlock USING INDEX repack_deadlock_pkey;
+ <waiting ...>
+step add_column: 
+	alter table repack_deadlock add column noise text;
+ <waiting ...>
+step add_column: <... completed>
+ERROR:  could not wait for concurrent REPACK
+step wakeup_before_lock: 
+	SELECT injection_points_wakeup('repack-concurrently-before-lock');
+
+injection_points_wakeup
+-----------------------
+                       
+(1 row)
+
+step wait_before_lock: <... completed>
+step check1: 
+	INSERT INTO relfilenodes(node)
+	SELECT relfilenode FROM pg_class WHERE relname='repack_deadlock';
+
+	SELECT count(DISTINCT node) FROM relfilenodes;
+
+	SELECT i, j FROM repack_deadlock ORDER BY i, j;
+
+	INSERT INTO data_s1(i, j)
+	SELECT i, j FROM repack_deadlock;
+
+	SELECT count(*)
+	FROM data_s1 d1 FULL JOIN data_s2 d2 USING (i, j)
+	WHERE d1.i ISNULL OR d2.i ISNULL;
+
+count
+-----
+    1
+(1 row)
+
+i|j
+-+-
+1|1
+2|2
+3|3
+4|4
+(4 rows)
+
+count
+-----
+    4
+(1 row)
+
+injection_points_detach
+-----------------------
+                       
+(1 row)
+
