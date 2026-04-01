@@ -324,8 +324,12 @@ extern PGDLLIMPORT ReplicationSlot *MyReplicationSlot;
 
 /* GUCs */
 extern PGDLLIMPORT int max_replication_slots;
+extern PGDLLIMPORT int max_repack_replication_slots;
 extern PGDLLIMPORT char *synchronized_standby_slots;
 extern PGDLLIMPORT int idle_replication_slot_timeout_secs;
+
+/* only for slotfuncs.c, slotsync.c etc */
+extern int TotalMaxReplicationSlots;
 
 /* shmem initialization functions */
 extern Size ReplicationSlotsShmemSize(void);
@@ -334,7 +338,7 @@ extern void ReplicationSlotsShmemInit(void);
 /* management of individual slots */
 extern void ReplicationSlotCreate(const char *name, bool db_specific,
 								  ReplicationSlotPersistency persistency,
-								  bool two_phase, bool failover,
+								  bool two_phase, bool repack, bool failover,
 								  bool synced);
 extern void ReplicationSlotPersist(void);
 extern void ReplicationSlotDrop(const char *name, bool nowait);

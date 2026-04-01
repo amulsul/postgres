@@ -53,7 +53,7 @@ create_physical_replication_slot(char *name, bool immediately_reserve,
 	/* acquire replication slot, this will check for conflicting names */
 	ReplicationSlotCreate(name, false,
 						  temporary ? RS_TEMPORARY : RS_PERSISTENT, false,
-						  false, false);
+						  false, false, false);
 
 	if (immediately_reserve)
 	{
@@ -146,7 +146,7 @@ create_logical_replication_slot(char *name, char *plugin,
 	 */
 	ReplicationSlotCreate(name, true,
 						  temporary ? RS_TEMPORARY : RS_EPHEMERAL, two_phase,
-						  failover, false);
+						  false, failover, false);
 
 	/*
 	 * Ensure the logical decoding is enabled before initializing the logical
@@ -270,7 +270,7 @@ pg_get_replication_slots(PG_FUNCTION_ARGS)
 	currlsn = GetXLogWriteRecPtr();
 
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-	for (slotno = 0; slotno < max_replication_slots; slotno++)
+	for (slotno = 0; slotno < TotalMaxReplicationSlots; slotno++)
 	{
 		ReplicationSlot *slot = &ReplicationSlotCtl->replication_slots[slotno];
 		ReplicationSlot slot_contents;
@@ -665,7 +665,7 @@ copy_replication_slot(FunctionCallInfo fcinfo, bool logical_slot)
 	 * managed to create the new slot, we advance the new slot's restart_lsn
 	 * to the source slot's updated restart_lsn the second time we lock it.
 	 */
-	for (int i = 0; i < max_replication_slots; i++)
+	for (int i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
 

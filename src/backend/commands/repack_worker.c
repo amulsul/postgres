@@ -228,8 +228,8 @@ repack_setup_logical_decoding(Oid relid)
 	 * RS_TEMPORARY so that the slot gets cleaned up on ERROR.
 	 */
 	snprintf(NameStr(slotname), NAMEDATALEN, "repack_%d", MyProcPid);
-	ReplicationSlotCreate(NameStr(slotname), true, RS_TEMPORARY, false, false,
-						  false);
+	ReplicationSlotCreate(NameStr(slotname), true, RS_TEMPORARY, false, true,
+						  false, false);
 
 	EnsureLogicalDecodingEnabled();
 

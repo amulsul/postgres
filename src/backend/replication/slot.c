@@ -151,6 +151,9 @@ ReplicationSlot *MyReplicationSlot = NULL;
 /* GUC variables */
 int			max_replication_slots = 10; /* the maximum number of replication
 										 * slots */
+int			max_repack_replication_slots = 1;	/* the maximum number of slots
+												 * for REPACK */
+int			TotalMaxReplicationSlots = 0;	/* sum of both */
 
 /*
  * Invalidate replication slots that have remained idle longer than this
@@ -190,12 +193,14 @@ ReplicationSlotsShmemSize(void)
 {
 	Size		size = 0;
 
-	if (max_replication_slots == 0)
+	TotalMaxReplicationSlots = max_replication_slots + max_repack_replication_slots;
+
+	if (TotalMaxReplicationSlots == 0)
 		return size;
 
 	size = offsetof(ReplicationSlotCtlData, replication_slots);
 	size = add_size(size,
-					mul_size(max_replication_slots, sizeof(ReplicationSlot)));
+					mul_size(TotalMaxReplicationSlots, sizeof(ReplicationSlot)));
 
 	return size;
 }
@@ -208,7 +213,7 @@ ReplicationSlotsShmemInit(void)
 {
 	bool		found;
 
-	if (max_replication_slots == 0)
+	if (TotalMaxReplicationSlots == 0)
 		return;
 
 	ReplicationSlotCtl = (ReplicationSlotCtlData *)
@@ -222,7 +227,7 @@ ReplicationSlotsShmemInit(void)
 		/* First time through, so initialize */
 		MemSet(ReplicationSlotCtl, 0, ReplicationSlotsShmemSize());
 
-		for (i = 0; i < max_replication_slots; i++)
+		for (i = 0; i < TotalMaxReplicationSlots; i++)
 		{
 			ReplicationSlot *slot = &ReplicationSlotCtl->replication_slots[i];
 
@@ -372,6 +377,7 @@ IsSlotForConflictCheck(const char *name)
  * db_specific: logical decoding is db specific; if the slot is going to
  *	   be used for that pass true, otherwise false.
  * two_phase: If enabled, allows decoding of prepared transactions.
+ * repack: If true, use a slot from the pool for REPACK.
  * failover: If enabled, allows the slot to be synced to standbys so
  *     that logical replication can be resumed after failover.
  * synced: True if the slot is synchronized from the primary server.
@@ -379,10 +385,11 @@ IsSlotForConflictCheck(const char *name)
 void
 ReplicationSlotCreate(const char *name, bool db_specific,
 					  ReplicationSlotPersistency persistency,
-					  bool two_phase, bool failover, bool synced)
+					  bool two_phase, bool repack, bool failover, bool synced)
 {
 	ReplicationSlot *slot = NULL;
-	int			i;
+	int			startpoint,
+				endpoint;
 
 	Assert(MyReplicationSlot == NULL);
 
@@ -431,12 +438,16 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	LWLockAcquire(ReplicationSlotAllocationLock, LW_EXCLUSIVE);
 
 	/*
-	 * Check for name collision, and identify an allocatable slot.  We need to
-	 * hold ReplicationSlotControlLock in shared mode for this, so that nobody
-	 * else can change the in_use flags while we're looking at them.
+	 * Check for name collision (across the whole array), and identify an
+	 * allocatable slot (in the array slice specific to our current use case:
+	 * either general, or REPACK only).  We need to hold
+	 * ReplicationSlotControlLock in shared mode for this, so that nobody else
+	 * can change the in_use flags while we're looking at them.
 	 */
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-	for (i = 0; i < max_replication_slots; i++)
+	startpoint = repack ? max_replication_slots : 0;
+	endpoint = repack ? TotalMaxReplicationSlots : max_replication_slots;
+	for (int i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
 
@@ -444,7 +455,9 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 			ereport(ERROR,
 					(errcode(ERRCODE_DUPLICATE_OBJECT),
 					 errmsg("replication slot \"%s\" already exists", name)));
-		if (!s->in_use && slot == NULL)
+
+		if (i >= startpoint && i < endpoint &&
+			!s->in_use && slot == NULL)
 			slot = s;
 	}
 	LWLockRelease(ReplicationSlotControlLock);
@@ -547,7 +560,7 @@ SearchNamedReplicationSlot(const char *name, bool need_lock)
 	if (need_lock)
 		LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 
-	for (i = 0; i < max_replication_slots; i++)
+	for (i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
 
@@ -575,7 +588,7 @@ int
 ReplicationSlotIndex(ReplicationSlot *slot)
 {
 	Assert(slot >= ReplicationSlotCtl->replication_slots &&
-		   slot < ReplicationSlotCtl->replication_slots + max_replication_slots);
+		   slot < ReplicationSlotCtl->replication_slots + TotalMaxReplicationSlots);
 
 	return slot - ReplicationSlotCtl->replication_slots;
 }
@@ -869,7 +882,7 @@ ReplicationSlotCleanup(bool synced_only)
 restart:
 	found_valid_logicalslot = false;
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-	for (i = 0; i < max_replication_slots; i++)
+	for (i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
 
@@ -1251,7 +1264,7 @@ ReplicationSlotsComputeRequiredXmin(bool already_locked)
 	if (!already_locked)
 		LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 
-	for (i = 0; i < max_replication_slots; i++)
+	for (i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
 		TransactionId effective_xmin;
@@ -1306,7 +1319,7 @@ ReplicationSlotsComputeRequiredLSN(void)
 	Assert(ReplicationSlotCtl != NULL);
 
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-	for (i = 0; i < max_replication_slots; i++)
+	for (i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
 		XLogRecPtr	restart_lsn;
@@ -1373,12 +1386,12 @@ ReplicationSlotsComputeLogicalRestartLSN(void)
 	XLogRecPtr	result = InvalidXLogRecPtr;
 	int			i;
 
-	if (max_replication_slots <= 0)
+	if (TotalMaxReplicationSlots <= 0)
 		return InvalidXLogRecPtr;
 
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 
-	for (i = 0; i < max_replication_slots; i++)
+	for (i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s;
 		XLogRecPtr	restart_lsn;
@@ -1453,11 +1466,11 @@ ReplicationSlotsCountDBSlots(Oid dboid, int *nslots, int *nactive)
 
 	*nslots = *nactive = 0;
 
-	if (max_replication_slots <= 0)
+	if (TotalMaxReplicationSlots <= 0)
 		return false;
 
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-	for (i = 0; i < max_replication_slots; i++)
+	for (i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s;
 
@@ -1514,13 +1527,13 @@ ReplicationSlotsDropDBSlots(Oid dboid)
 	bool		found_valid_logicalslot;
 	bool		dropped = false;
 
-	if (max_replication_slots <= 0)
+	if (TotalMaxReplicationSlots <= 0)
 		return;
 
 restart:
 	found_valid_logicalslot = false;
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-	for (i = 0; i < max_replication_slots; i++)
+	for (i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s;
 		char	   *slotname;
@@ -1617,11 +1630,11 @@ CheckLogicalSlotExists(void)
 {
 	bool		found = false;
 
-	if (max_replication_slots <= 0)
+	if (TotalMaxReplicationSlots <= 0)
 		return false;
 
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-	for (int i = 0; i < max_replication_slots; i++)
+	for (int i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s;
 		bool		invalidated;
@@ -1662,7 +1675,10 @@ CheckSlotRequirements(void)
 	 * needs the same check.
 	 */
 
-	if (max_replication_slots == 0)
+	/* FIXME how to relax this for repack in a way that doesn't mess everything
+	 * up?
+	 */
+	if (TotalMaxReplicationSlots == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("replication slots can only be used if \"max_replication_slots\" > 0")));
@@ -2216,7 +2232,7 @@ InvalidateObsoleteReplicationSlots(uint32 possible_causes,
 	Assert(!(possible_causes & RS_INVAL_WAL_REMOVED) || oldestSegno > 0);
 	Assert(possible_causes != RS_INVAL_NONE);
 
-	if (max_replication_slots == 0)
+	if (TotalMaxReplicationSlots == 0)
 		return invalidated;
 
 	XLogSegNoOffsetToRecPtr(oldestSegno, 0, wal_segment_size, oldestLSN);
@@ -2224,7 +2240,7 @@ InvalidateObsoleteReplicationSlots(uint32 possible_causes,
 restart:
 	found_valid_logicalslot = false;
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-	for (int i = 0; i < max_replication_slots; i++)
+	for (int i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
 		bool		released_lock = false;
@@ -2329,7 +2345,7 @@ CheckPointReplicationSlots(bool is_shutdown)
 	 */
 	LWLockAcquire(ReplicationSlotAllocationLock, LW_SHARED);
 
-	for (i = 0; i < max_replication_slots; i++)
+	for (i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
 		char		path[MAXPGPATH];
@@ -2430,7 +2446,7 @@ StartupReplicationSlots(void)
 	FreeDir(replication_dir);
 
 	/* currently no slots exist, we're done. */
-	if (max_replication_slots <= 0)
+	if (TotalMaxReplicationSlots <= 0)
 		return;
 
 	/* Now that we have recovered all the data, compute replication xmin */
@@ -2860,7 +2876,7 @@ RestoreSlotFromDisk(const char *name)
 				 errhint("Change \"wal_level\" to be \"replica\" or higher.")));
 
 	/* nothing can be active yet, don't lock anything */
-	for (i = 0; i < max_replication_slots; i++)
+	for (i = 0; i < TotalMaxReplicationSlots; i++)
 	{
 		ReplicationSlot *slot;
 
@@ -2902,6 +2918,7 @@ RestoreSlotFromDisk(const char *name)
 		break;
 	}
 
+	/* XXX might be misleading if the slots previously in use were REPACK. */
 	if (!restored)
 		ereport(FATAL,
 				(errmsg("too many replication slots active before shutdown"),
