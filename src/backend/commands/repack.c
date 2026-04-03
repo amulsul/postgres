@@ -289,6 +289,18 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 		MyProc->statusFlags |= PROC_IN_CONCURRENT_REPACK;
 		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
 		LWLockRelease(ProcArrayLock);
+
+		/*
+		 * Make sure we're not in a transaction block.
+		 *
+		 * The reason is that repack_setup_logical_decoding() could wait
+		 * indefinitely for our XID to complete. (The deadlock detector would
+		 * not recognize it because we'd be waiting for ourselves, i.e. no
+		 * real lock conflict.) It would be possible to run in a transaction
+		 * block if we had no XID, but this restriction is simpler for users
+		 * to understand and we don't lose anything.
+		 */
+		PreventInTransactionBlock(isTopLevel, "REPACK (CONCURRENTLY)");
 	}
 
 	/*
@@ -520,21 +532,7 @@ cluster_rel(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 	 * replica index OID.
 	 */
 	if (concurrent)
-	{
-		/*
-		 * Make sure we're not in a transaction block.
-		 *
-		 * The reason is that repack_setup_logical_decoding() could wait
-		 * indefinitely for our XID to complete. (The deadlock detector would
-		 * not recognize it because we'd be waiting for ourselves, i.e. no
-		 * real lock conflict.) It would be possible to run in a transaction
-		 * block if we had no XID, but this restriction is simpler for users
-		 * to understand and we don't lose anything.
-		 */
-		PreventInTransactionBlock(isTopLevel, "REPACK (CONCURRENTLY)");
-
 		check_repack_concurrently_requirements(OldHeap, &ident_idx);
-	}
 
 	/* Check for user-requested abort. */
 	CHECK_FOR_INTERRUPTS();
